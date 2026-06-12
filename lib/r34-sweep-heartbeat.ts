@@ -94,12 +94,10 @@ function getState(): R34SweepHeartbeatState {
 // BlockRun 和 Venice 不同：BlockRun 是实时扣款，每次推理直接从 CAW 钱包扣 USDC。
 // 这里监控 CAW 钱包 USDC 余额，低于阈值时仅告警（不自动充值）。
 //
-// 通过 `caw wallet balance` 命令读取链上 USDC 余额。
-// 如果 caw CLI 不支持，则回退到 viem 直接读链上。
+// 后台任务没有登录用户上下文，只读取显式配置的钱包地址。
 
 import { createPublicClient, http as viemHttp, formatUnits } from "viem";
 import { base, baseSepolia } from "viem/chains";
-import { spawn } from "node:child_process";
 
 type BlockRunBalanceState = {
   usdBalance: number;
@@ -131,31 +129,7 @@ function getBlockRunBalanceState(): BlockRunBalanceState {
 }
 
 async function readCawWalletUsdcBalance(): Promise<number | null> {
-  // 优先用 caw wallet balance（CAW 视角的余额）
-  try {
-    const proc = await new Promise<{ stdout: string; stderr: string; code: number }>((resolve) => {
-      const child = spawn("caw", ["wallet", "balance"], {
-        env: { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: "0" },
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      let stdout = "", stderr = "";
-      child.stdout.on("data", (b: Buffer) => (stdout += b.toString()));
-      child.stderr.on("data", (b: Buffer) => (stderr += b.toString()));
-      child.on("close", (code: number | null) => resolve({ stdout, stderr, code: code ?? 1 }));
-    });
-
-    const output = (proc.stdout || proc.stderr).trim();
-    try {
-      const json = JSON.parse(output);
-      for (const r of json.result || []) {
-        if (r.token_id === "BASE_USDC" || r.token_id === "TBASE_USDC") {
-          return Number(r.amount) || 0;
-        }
-      }
-    } catch {}
-  } catch {}
-
-  // 回退：用 viem 直接读链上
+  // 用 viem 直接读显式配置钱包的链上 USDC 余额，避免使用默认 CAW profile。
   try {
     const isTestnet = process.env.BLOCKRUN_USE_TESTNET !== "false";
     const chain = isTestnet ? baseSepolia : base;
@@ -199,6 +173,11 @@ async function checkBlockRunBalance(): Promise<void> {
 
       // 自动充值
       if (state.autoTopupEnabled) {
+        if (process.env.BLOCKRUN_ALLOW_GLOBAL_AUTOTOPUP !== "1") {
+          state.lastAutoTopupResult = "skipped_global_autotopup_disabled_for_multi_user";
+          console.log("[blockrun] 全局钱包自动充值已默认禁用；如需旧 demo 行为，设置 BLOCKRUN_ALLOW_GLOBAL_AUTOTOPUP=1");
+          return;
+        }
         console.log("[blockrun] 触发自动充值...");
         try {
           const blockrun = await import("@/lib/blockrun/topup");
@@ -341,6 +320,10 @@ async function checkVeniceBalance(): Promise<void> {
 
     // Below threshold → auto top-up if lock is idle
     if (usdBalance < state.veniceBalanceThreshold && isVeniceAutoTopupEnabled()) {
+      if (process.env.VENICE_ALLOW_DEMO_AUTOTOPUP !== "1") {
+        console.log("[venice-balance] 全局 demo 自动充值已默认禁用；用户级自动支付由 Agent/user 流程触发");
+        return;
+      }
       const topup = await import("@/lib/venice/topup");
       const lockState = topup.getPaymentLockState();
       if (lockState === "idle") {

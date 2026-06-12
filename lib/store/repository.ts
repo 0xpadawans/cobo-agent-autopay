@@ -1,11 +1,15 @@
 import type {
   AgentUsageEvent,
+  Agent,
+  AgentRun,
   CawAuthorization,
   CawAuthorizationPurpose,
+  CawRuntimeCredential,
   CreditAccount,
   DashboardSnapshot,
   LedgerEntry,
   TopupOrder,
+  VeniceTopupOrder,
   User,
   CawPairingSession,
   CawWalletOnboardingSession
@@ -37,10 +41,36 @@ export type CreditRepository = {
   createAuthorization(authorization: CawAuthorization): Promise<CawAuthorization>;
   updateAuthorization(authorization: CawAuthorization): Promise<CawAuthorization>;
   createPairingSession(userId: string, session: CawPairingSession): Promise<CawPairingSession>;
+  upsertCawRuntimeCredential(input: {
+    userId: string;
+    walletId: string;
+    walletAddress: string;
+    walletName?: string;
+    agentId: string;
+    apiUrl: string;
+    apiKeyEncrypted: string;
+    cawHomePath?: string;
+    keyVersion?: number;
+    lastVerifiedAt?: string;
+  }): Promise<CawRuntimeCredential>;
+  getCawRuntimeCredential(userId: string): Promise<CawRuntimeCredential | undefined>;
   getCawOnboardingSession(userId: string): Promise<CawWalletOnboardingSession | undefined>;
   upsertCawOnboardingSession(
     session: CawWalletOnboardingSession
   ): Promise<CawWalletOnboardingSession>;
+  getOrCreateAgent(input: {
+    userId: string;
+    name: string;
+  }): Promise<Agent>;
+  updateAgent(agent: Agent): Promise<Agent>;
+  createAgentRun(
+    input: Omit<AgentRun, "id" | "startedAt" | "updatedAt" | "completedAt">
+  ): Promise<AgentRun>;
+  updateAgentRun(run: AgentRun): Promise<AgentRun>;
+  createVeniceTopupOrder(
+    input: Omit<VeniceTopupOrder, "id" | "createdAt" | "updatedAt">
+  ): Promise<VeniceTopupOrder>;
+  updateVeniceTopupOrder(order: VeniceTopupOrder): Promise<VeniceTopupOrder>;
   createUsageEvent(input: Omit<AgentUsageEvent, "id" | "createdAt">): Promise<AgentUsageEvent>;
   appendLedgerEntry(input: Omit<LedgerEntry, "id" | "createdAt">): Promise<LedgerEntry>;
   findPendingTopupOrder(userId: string): Promise<TopupOrder | undefined>;

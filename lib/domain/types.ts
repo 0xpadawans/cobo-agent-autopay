@@ -17,6 +17,23 @@ export type TopupOrderStatus =
 
 export type AgentUsageStatus = "completed" | "failed_insufficient_balance";
 
+export type AgentStatus = "active" | "paused" | "disabled";
+
+export type AgentRunStatus =
+  | "running"
+  | "waiting_for_venice_balance"
+  | "completed"
+  | "failed";
+
+export type VeniceTopupOrderStatus =
+  | "pending_policy"
+  | "caw_submitted"
+  | "payment_submitted"
+  | "payment_failed"
+  | "balance_pending"
+  | "balance_confirmed"
+  | "failed";
+
 export type User = {
   id: string;
   email: string;
@@ -32,6 +49,21 @@ export type CreditAccount = {
   balanceCredits: number;
   lowBalanceThresholdCredits: number;
   autoTopupCredits: number;
+  updatedAt: string;
+};
+
+export type CawRuntimeCredential = {
+  id: string;
+  userId: string;
+  walletId: string;
+  walletAddress: string;
+  walletName?: string;
+  agentId: string;
+  apiUrl: string;
+  cawHomePath?: string;
+  keyVersion: number;
+  lastVerifiedAt?: string;
+  createdAt: string;
   updatedAt: string;
 };
 
@@ -93,6 +125,53 @@ export type AgentUsageEvent = {
   creditsCharged: number;
   status: AgentUsageStatus;
   createdAt: string;
+};
+
+export type Agent = {
+  id: string;
+  userId: string;
+  name: string;
+  status: AgentStatus;
+  veniceAutoTopup: boolean;
+  veniceTopupUsdMinor: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentRun = {
+  id: string;
+  userId: string;
+  agentId: string;
+  taskName: string;
+  prompt: string;
+  status: AgentRunStatus;
+  resumeAfterOrderId?: string;
+  lastError?: string;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+};
+
+export type VeniceTopupOrder = {
+  id: string;
+  userId: string;
+  agentId?: string;
+  agentRunId?: string;
+  walletAddress: string;
+  pactId: string;
+  status: VeniceTopupOrderStatus;
+  usdAmount: number;
+  amountUsdcMinor: number;
+  responseStatus?: number;
+  responseBodyPreview?: string;
+  txHash?: string;
+  balanceCanConsume?: boolean;
+  balanceUsd?: number;
+  failureReason?: string;
+  createdAt: string;
+  updatedAt: string;
+  paymentSubmittedAt?: string;
+  balanceCheckedAt?: string;
 };
 
 export type CawPairingSession = {
@@ -172,6 +251,7 @@ export type DashboardSnapshot = {
   account: CreditAccount;
   authorization?: CawAuthorization;
   veniceAuthorization?: CawAuthorization;
+  cawRuntimeCredential?: CawRuntimeCredential;
   pairingSession?: CawPairingSession;
   cawOnboardingSession?: CawWalletOnboardingSession;
   guardrails: UserGuardrails;
@@ -179,6 +259,9 @@ export type DashboardSnapshot = {
   pendingApprovals: TopupOrder[];
   pactDetails?: PactDetails;
   topupOrders: TopupOrder[];
+  veniceTopupOrders: VeniceTopupOrder[];
+  agents: Agent[];
+  agentRuns: AgentRun[];
   ledgerEntries: LedgerEntry[];
   usageEvents: AgentUsageEvent[];
   network: {

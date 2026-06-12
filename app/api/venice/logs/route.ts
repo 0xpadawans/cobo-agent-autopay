@@ -6,8 +6,8 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    await requireCurrentUser();
-    return okJson({ ok: true, logs: listInferenceLogs(20) });
+    const user = await requireCurrentUser();
+    return okJson({ ok: true, logs: listInferenceLogs(20, user.id) });
   } catch (error) {
     return errorJson(error);
   }

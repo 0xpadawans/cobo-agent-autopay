@@ -48,9 +48,11 @@ The default runtime expects real CAW credentials and real Base Sepolia calls:
 
 Offline mock mode requires both `CAW_MODE=mock` and `CAW_ALLOW_MOCK=true`.
 
-For a new user or a separate deployment, create a separate CAW Agent Wallet and
-switch the deployment environment variables before generating the pairing code.
-See `docs/new-user-caw-pairing.md`.
+For each app user, bind a separate CAW Agent Wallet. Login, wallet binding,
+pairing sessions, Pact records, and runtime credential metadata are stored by
+database `userId`, so returning users can continue from their own bound wallet.
+See `docs/new-user-caw-pairing.md` for the current per-user flow and the
+remaining production note around CAW API key storage.
 
 ## Pact Drafter
 
@@ -72,19 +74,29 @@ and the configured USDC address.
 
 ## Database Setup
 
-The local setup uses Postgres through Prisma by default. The durable schema is
-defined in `prisma/schema.prisma`; use `STORAGE_DRIVER=prisma` after migrations
-are applied.
+Local demos use SQLite through Prisma by default. Copy the environment template
+and initialize the database:
 
 ```bash
 cp .env.example .env
-npm run db:generate
-npm run db:migrate
+npm run db:init
 ```
 
-Set `DATABASE_URL` to a Postgres database before running migrations.
+Database configuration lives in `.env`:
 
-Use `STORAGE_DRIVER=memory` only for throwaway local development. Real runs should use `STORAGE_DRIVER=prisma`.
+```bash
+DATABASE_URL="file:./dev.db"
+STORAGE_DRIVER=prisma
+```
+
+If your `.env` still has an old Postgres URL, replace it with the SQLite value
+above before running `npm run db:init`.
+
+The SQLite file is created at `prisma/dev.db`. The init script is idempotent: if
+the database already exists and migrations are applied, it keeps the data and
+reports the schema as up to date.
+
+See `docs/database-setup.md` for the fresh-demo-machine checklist.
 
 ## Testnet Mode
 
@@ -135,8 +147,18 @@ For a real deployment:
   CAW metadata if your test environment uses a different name.
 - Deploy `contracts/CreditsPayment.sol` on Base Sepolia for testnet demos.
 - Configure `PAYMENT_CONTRACT_ADDRESS` and `TREASURY_ADDRESS`.
-- Replace the in-memory store with a durable database.
+- Use `STORAGE_DRIVER=prisma` and run migrations so per-user wallet bindings,
+  onboarding sessions, Pact records, and runtime credential metadata survive
+  restarts.
 - Subscribe to `CreditsPurchased` events and call `POST /api/webhooks/chain/credits-payment`.
+
+Important multi-user note: the app stores one CAW wallet binding per login
+email. CLI-backed onboarding/Pact operations use an isolated CAW CLI home per
+`userId`, and CAW SDK paths such as USDC approval, credits top-up execution, and
+transaction listing now initialize the gateway from that user's runtime
+credential/profile instead of silently falling back to the deployment wallet.
+For hardened production storage, replace the current `caw-cli-profile:<walletId>`
+marker with encrypted API-key storage and server-side decryption.
 
 ## Core Flow
 

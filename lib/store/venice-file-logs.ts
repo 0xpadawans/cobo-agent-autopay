@@ -67,7 +67,8 @@ export function appendInferenceLog(
   return entry;
 }
 
-export function listInferenceLogs(limit = 20): InferenceLogEntry[] {
+export function listInferenceLogs(limit = 20, userId?: string): InferenceLogEntry[] {
   const logs = readLogs();
-  return logs.slice(0, limit);
+  const scoped = userId ? logs.filter((log) => log.userId === userId) : logs;
+  return scoped.slice(0, limit);
 }

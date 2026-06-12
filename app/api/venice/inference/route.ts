@@ -1,6 +1,7 @@
 import { requireCurrentUser } from "@/lib/auth/session";
 import { errorJson, okJson, readJson } from "@/lib/http";
-import { getVeniceApiKey, runVeniceChatCompletion } from "@/lib/venice/client";
+import { getVeniceApiKeyForUser, getVeniceModelForUser } from "@/lib/config/store";
+import { runVeniceChatCompletion } from "@/lib/venice/client";
 import { appendInferenceLog } from "@/lib/store/venice-file-logs";
 
 export const dynamic = "force-dynamic";
@@ -26,7 +27,8 @@ export async function POST(request: Request) {
     prompt = body.prompt?.trim() || "";
     model = body.model?.trim() || "";
 
-    if (!getVeniceApiKey()) {
+    const apiKey = getVeniceApiKeyForUser(user.id);
+    if (!apiKey) {
       throw new Error("VENICE_API_KEY is required for Venice inference.");
     }
 
@@ -37,7 +39,8 @@ export async function POST(request: Request) {
     const result = await runVeniceChatCompletion({
       prompt,
       systemPrompt: body.systemPrompt,
-      model: body.model
+      model: body.model ?? getVeniceModelForUser(user.id),
+      apiKey
     });
 
     const durationMs = Date.now() - startTime;

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 // In-memory config store (not persistent, but fine for dev)
-let config: {
+const config: {
   model: string;
   useTestnet: boolean;
   minBalance: number;

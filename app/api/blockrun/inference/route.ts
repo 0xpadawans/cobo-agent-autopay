@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { addBlockRunLog } from '@/app/api/blockrun/logs-store';
+import { requireCurrentUser } from '@/lib/auth/session';
+import type { BlockRunMessage } from '@/lib/blockrun/topup';
 import type { BlockRunX402Step } from '@/lib/blockrun/types';
 
 export async function POST(req: NextRequest) {
   const start = Date.now();
 
   try {
+    const user = await requireCurrentUser();
     const body = await req.json();
     const { prompt, model } = body;
 
@@ -22,9 +25,8 @@ export async function POST(req: NextRequest) {
       // Get pact info from database
       let pactId: string;
       let walletAddress: string;
-      let pactNetwork: string;
       try {
-        const request = await getBlockRunX402Request('api');
+        const request = await getBlockRunX402Request(user.id);
         pactId = request.pactId;
         walletAddress = request.walletAddress;
       } catch {
@@ -34,19 +36,18 @@ export async function POST(req: NextRequest) {
       }
 
       const configInfo = getBlockRunConfigInfo();
-      pactNetwork = configInfo.network;
+      const pactNetwork = configInfo.network;
 
       const result = await runBlockRunX402Inference({
-        userId: 'api',
+        userId: user.id,
         walletAddress,
         pactId,
         model: modelToUse,
-        messages: [{ role: 'user', content: prompt }] as any,
+        messages: [{ role: 'user', content: prompt }] satisfies BlockRunMessage[],
         usdAmount: 0.01,
       });
 
       const durationMs = Date.now() - start;
-      const hasSteps = result.steps !== undefined;
 
       if (result.status === 'completed' && result.responseStatus >= 200 && result.responseStatus < 300) {
         // Try to extract the actual response content

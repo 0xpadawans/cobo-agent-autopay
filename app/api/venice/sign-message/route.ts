@@ -1,8 +1,8 @@
 import { NextRequest } from "next/server";
 import { requireCurrentUser } from "@/lib/auth/session";
 import { getCreditRepository } from "@/lib/store";
+import { getCawIntegrationStatus } from "@/lib/domain/services";
 import { signSiweXWithCaw, encodeSiweXHeader } from "@/lib/venice/siwe";
-import { getCawRuntimeStatus } from "@/lib/caw/gateway";
 import { errorJson, okJson, readJson } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
@@ -17,7 +17,8 @@ export async function POST(request: NextRequest) {
     const user = await requireCurrentUser();
     const body = await readJson<{ uri?: string; chainId?: string }>(request);
 
-    const runtime = await getCawRuntimeStatus();
+    const cawStatus = await getCawIntegrationStatus(user.id);
+    const runtime = cawStatus.runtime;
     if (runtime.mode !== "http") {
       return errorJson(
         new Error(
@@ -43,6 +44,7 @@ export async function POST(request: NextRequest) {
     const uri = body.uri ?? "https://api.venice.ai/api/v1/chat/completions";
 
     const payload = await signSiweXWithCaw({
+      userId: user.id,
       pactId: auth.pactId,
       chainId,
       walletAddress,

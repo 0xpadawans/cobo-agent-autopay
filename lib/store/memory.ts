@@ -9,15 +9,19 @@ import {
   getConfiguredChain
 } from "@/lib/domain/constants";
 import type {
+  Agent,
+  AgentRun,
   AgentUsageEvent,
   CawAuthorization,
   CawAuthorizationPurpose,
+  CawRuntimeCredential,
   CreditAccount,
   CawPairingSession,
   CawWalletOnboardingSession,
   DashboardSnapshot,
   LedgerEntry,
   TopupOrder,
+  VeniceTopupOrder,
   User
 } from "@/lib/domain/types";
 
@@ -25,6 +29,10 @@ type AgentDb = {
   users: Map<string, User>;
   creditAccounts: Map<string, CreditAccount>;
   cawAuthorizations: Map<string, CawAuthorization>;
+  cawRuntimeCredentials: Map<string, CawRuntimeCredential>;
+  agents: Map<string, Agent>;
+  agentRuns: Map<string, AgentRun>;
+  veniceTopupOrders: Map<string, VeniceTopupOrder>;
   ledgerEntries: LedgerEntry[];
   topupOrders: Map<string, TopupOrder>;
   usageEvents: AgentUsageEvent[];
@@ -65,6 +73,10 @@ function createInitialDb(): AgentDb {
     users: new Map([[DEMO_USER_ID, user]]),
     creditAccounts: new Map([[DEMO_USER_ID, account]]),
     cawAuthorizations: new Map(),
+    cawRuntimeCredentials: new Map(),
+    agents: new Map(),
+    agentRuns: new Map(),
+    veniceTopupOrders: new Map(),
     ledgerEntries: [
       {
         id: createId("led"),
@@ -163,6 +175,15 @@ export function snapshotForUser(userId: string): DashboardSnapshot {
   const topupOrders = [...db.topupOrders.values()]
     .filter((order) => order.userId === userId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const veniceTopupOrders = [...db.veniceTopupOrders.values()]
+    .filter((order) => order.userId === userId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const agents = [...db.agents.values()]
+    .filter((agent) => agent.userId === userId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const agentRuns = [...db.agentRuns.values()]
+    .filter((run) => run.userId === userId)
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt));
   const creditedOrders = topupOrders.filter((order) => order.status === "credited");
   const now = Date.now();
   const dayAgo = now - 24 * 60 * 60 * 1000;
@@ -175,6 +196,7 @@ export function snapshotForUser(userId: string): DashboardSnapshot {
     account,
     authorization: publicAuthorization,
     veniceAuthorization: publicVeniceAuthorization,
+    cawRuntimeCredential: db.cawRuntimeCredentials.get(userId),
     pairingSession: db.pairingSessions.get(userId),
     cawOnboardingSession: db.cawOnboardingSessions.get(userId),
     guardrails: {
@@ -218,6 +240,9 @@ export function snapshotForUser(userId: string): DashboardSnapshot {
         }
       : undefined,
     topupOrders: topupOrders.slice(0, 12),
+    veniceTopupOrders: veniceTopupOrders.slice(0, 12),
+    agents,
+    agentRuns: agentRuns.slice(0, 12),
     ledgerEntries: db.ledgerEntries
       .filter((entry) => entry.userId === userId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))

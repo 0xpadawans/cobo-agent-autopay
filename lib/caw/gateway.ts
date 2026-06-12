@@ -142,6 +142,15 @@ export type CawRuntimeStatus = {
   error?: string;
 };
 
+export type CawGatewayConfig = {
+  apiUrl?: string;
+  apiKey?: string;
+  walletId?: string;
+  walletAddress?: string;
+  walletName?: string;
+  allowEnvFallback?: boolean;
+};
+
 class MockCawGateway implements CawGateway {
   async createPairingCode(input: { userId: string; walletId?: string }) {
     const seed = input.userId.replace(/[^a-z0-9]/gi, "").slice(-5).toUpperCase() || "DEMO1";
@@ -214,14 +223,30 @@ class HttpCawGateway implements CawGateway {
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly defaultWalletId?: string;
+  private readonly defaultWalletAddress?: string;
 
-  constructor() {
-    this.baseUrl = requiredEnvAlias(["AGENT_WALLET_API_URL", "CAW_API_BASE_URL"]).replace(
+  constructor(config: CawGatewayConfig = {}) {
+    this.baseUrl = requiredConfigAlias(
+      config.apiUrl,
+      ["AGENT_WALLET_API_URL", "CAW_API_BASE_URL"],
+      config.allowEnvFallback !== false
+    ).replace(
       /\/$/,
       ""
     );
-    this.apiKey = requiredEnvAlias(["AGENT_WALLET_API_KEY", "CAW_API_KEY"]);
-    this.defaultWalletId = process.env.AGENT_WALLET_WALLET_ID || process.env.CAW_WALLET_ID;
+    this.apiKey = requiredConfigAlias(
+      config.apiKey,
+      ["AGENT_WALLET_API_KEY", "CAW_API_KEY"],
+      config.allowEnvFallback !== false
+    );
+    this.defaultWalletId =
+      config.walletId ||
+      (config.allowEnvFallback === false
+        ? undefined
+        : process.env.AGENT_WALLET_WALLET_ID || process.env.CAW_WALLET_ID);
+    this.defaultWalletAddress =
+      config.walletAddress ||
+      (config.allowEnvFallback === false ? undefined : process.env.CAW_WALLET_ADDRESS);
   }
 
   async createPairingCode(input: { userId: string; walletId?: string }) {
@@ -251,7 +276,7 @@ class HttpCawGateway implements CawGateway {
       walletAddress:
         stringField(source, "address", "") ||
         stringField(source, "addr", "") ||
-        process.env.CAW_WALLET_ADDRESS ||
+        this.defaultWalletAddress ||
         input.walletAddress ||
         ""
     };
@@ -537,17 +562,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-export function createCawGateway(): CawGateway {
-  return getConfiguredCawMode() === "mock" ? new MockCawGateway() : new HttpCawGateway();
+export function createCawGateway(config: CawGatewayConfig = {}): CawGateway {
+  return getConfiguredCawMode() === "mock" ? new MockCawGateway() : new HttpCawGateway(config);
 }
 
 export async function getCawRuntimeStatus(input: {
   walletId?: string;
+  walletName?: string;
+  walletAddress?: string;
+  apiUrl?: string;
+  apiKey?: string;
   useDefaultWallet?: boolean;
 } = {}): Promise<CawRuntimeStatus> {
   const mode = getConfiguredCawMode();
-  const apiUrl = process.env.AGENT_WALLET_API_URL || process.env.CAW_API_BASE_URL || "";
-  const apiKey = process.env.AGENT_WALLET_API_KEY || process.env.CAW_API_KEY || "";
+  const apiUrl = input.apiUrl || process.env.AGENT_WALLET_API_URL || process.env.CAW_API_BASE_URL || "";
+  const apiKey = input.apiKey || process.env.AGENT_WALLET_API_KEY || process.env.CAW_API_KEY || "";
   const defaultWalletId = process.env.AGENT_WALLET_WALLET_ID || process.env.CAW_WALLET_ID || "";
   const walletId = input.walletId || (input.useDefaultWallet === false ? "" : defaultWalletId);
   const chain = getConfiguredChain();
@@ -558,6 +587,7 @@ export async function getCawRuntimeStatus(input: {
     apiConfigured: Boolean(apiUrl && apiKey),
     walletConfigured: Boolean(walletId),
     walletId: walletId || undefined,
+    walletName: input.walletName,
     walletPaired: mode === "mock",
     chainId,
     chainName: chain.name,
@@ -574,7 +604,7 @@ export async function getCawRuntimeStatus(input: {
       ...baseStatus,
       walletName: "Mock CAW wallet",
       walletStatus: "mock_active",
-      walletAddress: process.env.CAW_WALLET_ADDRESS || undefined
+      walletAddress: input.walletAddress || process.env.CAW_WALLET_ADDRESS || undefined
     };
   }
 
@@ -617,7 +647,7 @@ export async function getCawRuntimeStatus(input: {
       ...baseStatus,
       walletName: walletResult?.name,
       walletStatus: walletResult?.status,
-      walletAddress: firstAddress?.address,
+      walletAddress: firstAddress?.address || input.walletAddress,
       walletPaired,
       pairTokenStatus
     };
@@ -673,11 +703,20 @@ function getRuntimeMissingItems(status: Omit<CawRuntimeStatus, "missing">) {
   return missing;
 }
 
-function requiredEnvAlias(names: string[]) {
-  for (const name of names) {
-    const value = process.env[name];
-    if (value) {
-      return value;
+function requiredConfigAlias(
+  configValue: string | undefined,
+  names: string[],
+  allowEnvFallback: boolean
+) {
+  if (configValue) {
+    return configValue;
+  }
+  if (allowEnvFallback) {
+    for (const name of names) {
+      const value = process.env[name];
+      if (value) {
+        return value;
+      }
     }
   }
   throw new Error(`${names.join(" or ")} is required when CAW_MODE=http.`);

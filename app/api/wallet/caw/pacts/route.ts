@@ -9,10 +9,10 @@
 // warning when a Venice top-up is attempted.
 
 import { NextResponse } from "next/server";
-import { spawnSync } from "child_process";
 import type { CawPactSummary } from "@/lib/venice/types";
-import { resolveCawRuntimeConfig } from "@/lib/caw/runtime-config-store";
 import { requireCurrentUser } from "@/lib/auth/session";
+import { runCawCli } from "@/lib/caw/cli";
+import { getCreditRepository } from "@/lib/store";
 
 function inferStatus(value: unknown): CawPactSummary["status"] {
   if (typeof value !== "string") return "unknown";
@@ -31,36 +31,20 @@ function inferStatus(value: unknown): CawPactSummary["status"] {
 }
 
 export async function GET(request: Request) {
-  await requireCurrentUser();
+  const user = await requireCurrentUser();
   const url = new URL(request.url);
   const status = url.searchParams.get("status") ?? "active";
   if (!["active", "pending_approval", "completed", "expired", "revoked", "rejected"].includes(status)) {
     return NextResponse.json({ ok: false, error: "invalid status" }, { status: 400 });
   }
-  const resolved = resolveCawRuntimeConfig();
+  const snapshot = await getCreditRepository().snapshotForUser(user.id);
 
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const CAW_HOME = process.env.HOME || require("os").homedir();
-
-  // We do NOT pass --wallet-id because caw pact list operates on the
-  // active profile. The active profile is determined by HOME + the
-  // caw wallet current selection, not by the runtime config UUID.
-  // The runtime config UUID is used downstream (e.g. pair, fetch) but
-  // the CLI's `pact list` always reads the active profile.
   try {
-    const proc = spawnSync("caw", ["pact", "list", "--status", status, "--limit", "50"], {
-      timeout: 15000,
-      encoding: "utf-8",
-      env: {
-        ...process.env,
-        HOME: CAW_HOME
-      }
+    const proc = await runCawCli(user.id, ["pact", "list", "--status", status, "--limit", "50"], {
+      timeoutMs: 15_000
     });
-    if (proc.error) {
-      throw proc.error;
-    }
-    if (proc.status !== 0) {
-      throw new Error(proc.stderr || `caw pact list failed with status ${proc.status}`);
+    if (proc.exitCode !== 0) {
+      throw new Error(proc.stderr || `caw pact list failed with status ${proc.exitCode}`);
     }
     const raw = proc.stdout ?? "";
     const data = JSON.parse(raw) as {
@@ -117,9 +101,9 @@ export async function GET(request: Request) {
       pacts,
       hasBaseUsdcPact,
       boundWallet: {
-        walletUuid: resolved.walletUuid,
-        walletName: resolved.walletName,
-        source: resolved.source
+        walletUuid: snapshot.user.cawWalletId,
+        walletName: snapshot.cawRuntimeCredential?.walletName,
+        source: "user"
       }
     });
   } catch (e: unknown) {
@@ -129,9 +113,9 @@ export async function GET(request: Request) {
         ok: false,
         error: msg,
         boundWallet: {
-          walletUuid: resolved.walletUuid,
-          walletName: resolved.walletName,
-          source: resolved.source
+          walletUuid: snapshot.user.cawWalletId,
+          walletName: snapshot.cawRuntimeCredential?.walletName,
+          source: "user"
         }
       },
       { status: 500 }

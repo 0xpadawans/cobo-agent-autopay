@@ -13,6 +13,8 @@ type TopupBody = {
   amountUsdc?: number;
   usdAmount?: number;
   amountUsdcMinor?: number;
+  agentId?: string;
+  agentRunId?: string;
   confirmed?: boolean;
 };
 
@@ -44,6 +46,8 @@ export async function POST(request: Request) {
     });
     return okJson(await runVeniceX402Topup({
       userId: user.id,
+      agentId: body.agentId,
+      agentRunId: body.agentRunId,
       walletAddress: topupRequest.walletAddress,
       pactId: topupRequest.pactId,
       usdAmount: topupRequest.usdAmount

@@ -10,13 +10,17 @@ import {
   getConfiguredChain
 } from "@/lib/domain/constants";
 import type {
+  Agent,
+  AgentRun,
   AgentUsageEvent,
   CawAuthorization,
   CawAuthorizationPurpose,
+  CawRuntimeCredential,
   CreditAccount,
   DashboardSnapshot,
   LedgerEntry,
   TopupOrder,
+  VeniceTopupOrder,
   User,
   CawPairingSession,
   CawWalletOnboardingSession,
@@ -47,12 +51,37 @@ export const prismaRepository: CreditRepository = {
       where: { userId, purpose: "venice_x402" },
       orderBy: { createdAt: "desc" }
     });
-    const [pairingSession, cawOnboardingSession, topupOrders, ledgerEntries, usageEvents] = await Promise.all([
+    const [
+      pairingSession,
+      cawOnboardingSession,
+      cawRuntimeCredential,
+      topupOrders,
+      veniceTopupOrders,
+      agents,
+      agentRuns,
+      ledgerEntries,
+      usageEvents
+    ] = await Promise.all([
       prisma.cawPairingSession.findUnique({ where: { userId } }),
       prisma.cawWalletOnboardingSession.findUnique({ where: { userId } }),
+      prisma.cawRuntimeCredential.findUnique({ where: { userId } }),
       prisma.topupOrder.findMany({
         where: { userId },
         orderBy: { createdAt: "desc" },
+        take: 12
+      }),
+      prisma.veniceTopupOrder.findMany({
+        where: { userId },
+        orderBy: { createdAt: "desc" },
+        take: 12
+      }),
+      prisma.agent.findMany({
+        where: { userId },
+        orderBy: { createdAt: "desc" }
+      }),
+      prisma.agentRun.findMany({
+        where: { userId },
+        orderBy: { startedAt: "desc" },
         take: 12
       }),
       prisma.ledgerEntry.findMany({
@@ -86,6 +115,9 @@ export const prismaRepository: CreditRepository = {
       account: mapCreditAccount(account),
       authorization: mappedAuthorization,
       veniceAuthorization: mappedVeniceAuthorization,
+      cawRuntimeCredential: cawRuntimeCredential
+        ? mapCawRuntimeCredential(cawRuntimeCredential)
+        : undefined,
       pairingSession: pairingSession ? mapPairingSession(pairingSession) : undefined,
       cawOnboardingSession: cawOnboardingSession
         ? mapCawOnboardingSession(cawOnboardingSession)
@@ -132,6 +164,9 @@ export const prismaRepository: CreditRepository = {
           }
         : undefined,
       topupOrders: mappedTopupOrders,
+      veniceTopupOrders: veniceTopupOrders.map(mapVeniceTopupOrder),
+      agents: agents.map(mapAgent),
+      agentRuns: agentRuns.map(mapAgentRun),
       ledgerEntries: ledgerEntries.map(mapLedgerEntry),
       usageEvents: usageEvents.map(mapUsageEvent),
       network: {
@@ -301,6 +336,40 @@ export const prismaRepository: CreditRepository = {
     });
     return mapPairingSession(created);
   },
+  async upsertCawRuntimeCredential(input): Promise<CawRuntimeCredential> {
+    const updated = await prisma.cawRuntimeCredential.upsert({
+      where: { userId: input.userId },
+      create: {
+        id: createId("crc"),
+        userId: input.userId,
+        walletId: input.walletId,
+        walletAddress: input.walletAddress.toLowerCase(),
+        walletName: input.walletName,
+        agentId: input.agentId,
+        apiUrl: input.apiUrl,
+        apiKeyEncrypted: input.apiKeyEncrypted,
+        cawHomePath: input.cawHomePath,
+        keyVersion: input.keyVersion ?? 1,
+        lastVerifiedAt: input.lastVerifiedAt ? new Date(input.lastVerifiedAt) : undefined
+      },
+      update: {
+        walletId: input.walletId,
+        walletAddress: input.walletAddress.toLowerCase(),
+        walletName: input.walletName,
+        agentId: input.agentId,
+        apiUrl: input.apiUrl,
+        apiKeyEncrypted: input.apiKeyEncrypted,
+        cawHomePath: input.cawHomePath,
+        keyVersion: input.keyVersion ?? 1,
+        lastVerifiedAt: input.lastVerifiedAt ? new Date(input.lastVerifiedAt) : null
+      }
+    });
+    return mapCawRuntimeCredential(updated);
+  },
+  async getCawRuntimeCredential(userId: string): Promise<CawRuntimeCredential | undefined> {
+    const credential = await prisma.cawRuntimeCredential.findUnique({ where: { userId } });
+    return credential ? mapCawRuntimeCredential(credential) : undefined;
+  },
   async getCawOnboardingSession(
     userId: string
   ): Promise<CawWalletOnboardingSession | undefined> {
@@ -349,6 +418,112 @@ export const prismaRepository: CreditRepository = {
       }
     });
     return mapCawOnboardingSession(updated);
+  },
+  async getOrCreateAgent(input: { userId: string; name: string }): Promise<Agent> {
+    const existing = await prisma.agent.findUnique({
+      where: { userId_name: { userId: input.userId, name: input.name } }
+    });
+    if (existing) {
+      return mapAgent(existing);
+    }
+    const created = await prisma.agent.create({
+      data: {
+        id: createId("agt"),
+        userId: input.userId,
+        name: input.name
+      }
+    });
+    return mapAgent(created);
+  },
+  async updateAgent(agent: Agent): Promise<Agent> {
+    const updated = await prisma.agent.update({
+      where: { id: agent.id },
+      data: {
+        name: agent.name,
+        status: agent.status,
+        veniceAutoTopup: agent.veniceAutoTopup,
+        veniceTopupUsdMinor: agent.veniceTopupUsdMinor
+      }
+    });
+    return mapAgent(updated);
+  },
+  async createAgentRun(
+    input: Omit<AgentRun, "id" | "startedAt" | "updatedAt" | "completedAt">
+  ): Promise<AgentRun> {
+    const created = await prisma.agentRun.create({
+      data: {
+        id: createId("run"),
+        userId: input.userId,
+        agentId: input.agentId,
+        taskName: input.taskName,
+        prompt: input.prompt,
+        status: input.status,
+        resumeAfterOrderId: input.resumeAfterOrderId,
+        lastError: input.lastError
+      }
+    });
+    return mapAgentRun(created);
+  },
+  async updateAgentRun(run: AgentRun): Promise<AgentRun> {
+    const updated = await prisma.agentRun.update({
+      where: { id: run.id },
+      data: {
+        status: run.status,
+        resumeAfterOrderId: run.resumeAfterOrderId,
+        lastError: run.lastError,
+        completedAt: run.completedAt ? new Date(run.completedAt) : null
+      }
+    });
+    return mapAgentRun(updated);
+  },
+  async createVeniceTopupOrder(
+    input: Omit<VeniceTopupOrder, "id" | "createdAt" | "updatedAt">
+  ): Promise<VeniceTopupOrder> {
+    const created = await prisma.veniceTopupOrder.create({
+      data: {
+        id: createId("vto"),
+        userId: input.userId,
+        agentId: input.agentId,
+        agentRunId: input.agentRunId,
+        walletAddress: input.walletAddress.toLowerCase(),
+        pactId: input.pactId,
+        status: input.status,
+        usdAmount: input.usdAmount,
+        amountUsdcMinor: input.amountUsdcMinor,
+        responseStatus: input.responseStatus,
+        responseBodyPreview: input.responseBodyPreview,
+        txHash: input.txHash,
+        balanceCanConsume: input.balanceCanConsume,
+        balanceUsd: input.balanceUsd,
+        failureReason: input.failureReason,
+        paymentSubmittedAt: input.paymentSubmittedAt ? new Date(input.paymentSubmittedAt) : undefined,
+        balanceCheckedAt: input.balanceCheckedAt ? new Date(input.balanceCheckedAt) : undefined
+      }
+    });
+    return mapVeniceTopupOrder(created);
+  },
+  async updateVeniceTopupOrder(order: VeniceTopupOrder): Promise<VeniceTopupOrder> {
+    const updated = await prisma.veniceTopupOrder.update({
+      where: { id: order.id },
+      data: {
+        agentId: order.agentId,
+        agentRunId: order.agentRunId,
+        walletAddress: order.walletAddress.toLowerCase(),
+        pactId: order.pactId,
+        status: order.status,
+        usdAmount: order.usdAmount,
+        amountUsdcMinor: order.amountUsdcMinor,
+        responseStatus: order.responseStatus,
+        responseBodyPreview: order.responseBodyPreview,
+        txHash: order.txHash,
+        balanceCanConsume: order.balanceCanConsume,
+        balanceUsd: order.balanceUsd,
+        failureReason: order.failureReason,
+        paymentSubmittedAt: order.paymentSubmittedAt ? new Date(order.paymentSubmittedAt) : null,
+        balanceCheckedAt: order.balanceCheckedAt ? new Date(order.balanceCheckedAt) : null
+      }
+    });
+    return mapVeniceTopupOrder(updated);
   },
   async createUsageEvent(
     input: Omit<AgentUsageEvent, "id" | "createdAt">
@@ -773,6 +948,130 @@ function mapTopupOrder(order: {
     createdAt: order.createdAt.toISOString(),
     updatedAt: order.updatedAt.toISOString(),
     creditedAt: order.creditedAt?.toISOString()
+  };
+}
+
+function mapCawRuntimeCredential(credential: {
+  id: string;
+  userId: string;
+  walletId: string;
+  walletAddress: string;
+  walletName: string | null;
+  agentId: string;
+  apiUrl: string;
+  cawHomePath: string | null;
+  keyVersion: number;
+  lastVerifiedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}): CawRuntimeCredential {
+  return {
+    id: credential.id,
+    userId: credential.userId,
+    walletId: credential.walletId,
+    walletAddress: credential.walletAddress,
+    walletName: credential.walletName ?? undefined,
+    agentId: credential.agentId,
+    apiUrl: credential.apiUrl,
+    cawHomePath: credential.cawHomePath ?? undefined,
+    keyVersion: credential.keyVersion,
+    lastVerifiedAt: credential.lastVerifiedAt?.toISOString(),
+    createdAt: credential.createdAt.toISOString(),
+    updatedAt: credential.updatedAt.toISOString()
+  };
+}
+
+function mapAgent(agent: {
+  id: string;
+  userId: string;
+  name: string;
+  status: Agent["status"];
+  veniceAutoTopup: boolean;
+  veniceTopupUsdMinor: number;
+  createdAt: Date;
+  updatedAt: Date;
+}): Agent {
+  return {
+    id: agent.id,
+    userId: agent.userId,
+    name: agent.name,
+    status: agent.status,
+    veniceAutoTopup: agent.veniceAutoTopup,
+    veniceTopupUsdMinor: agent.veniceTopupUsdMinor,
+    createdAt: agent.createdAt.toISOString(),
+    updatedAt: agent.updatedAt.toISOString()
+  };
+}
+
+function mapAgentRun(run: {
+  id: string;
+  userId: string;
+  agentId: string;
+  taskName: string;
+  prompt: string;
+  status: AgentRun["status"];
+  resumeAfterOrderId: string | null;
+  lastError: string | null;
+  startedAt: Date;
+  updatedAt: Date;
+  completedAt: Date | null;
+}): AgentRun {
+  return {
+    id: run.id,
+    userId: run.userId,
+    agentId: run.agentId,
+    taskName: run.taskName,
+    prompt: run.prompt,
+    status: run.status,
+    resumeAfterOrderId: run.resumeAfterOrderId ?? undefined,
+    lastError: run.lastError ?? undefined,
+    startedAt: run.startedAt.toISOString(),
+    updatedAt: run.updatedAt.toISOString(),
+    completedAt: run.completedAt?.toISOString()
+  };
+}
+
+function mapVeniceTopupOrder(order: {
+  id: string;
+  userId: string;
+  agentId: string | null;
+  agentRunId: string | null;
+  walletAddress: string;
+  pactId: string;
+  status: VeniceTopupOrder["status"];
+  usdAmount: number;
+  amountUsdcMinor: number;
+  responseStatus: number | null;
+  responseBodyPreview: string | null;
+  txHash: string | null;
+  balanceCanConsume: boolean | null;
+  balanceUsd: number | null;
+  failureReason: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  paymentSubmittedAt: Date | null;
+  balanceCheckedAt: Date | null;
+}): VeniceTopupOrder {
+  return {
+    id: order.id,
+    userId: order.userId,
+    agentId: order.agentId ?? undefined,
+    agentRunId: order.agentRunId ?? undefined,
+    walletAddress: order.walletAddress,
+    pactId: order.pactId,
+    status: order.status,
+    usdAmount: order.usdAmount,
+    amountUsdcMinor: order.amountUsdcMinor,
+    responseStatus: order.responseStatus ?? undefined,
+    responseBodyPreview: order.responseBodyPreview ?? undefined,
+    txHash: order.txHash ?? undefined,
+    balanceCanConsume: order.balanceCanConsume ?? undefined,
+    balanceUsd: order.balanceUsd ?? undefined,
+    failureReason: order.failureReason ?? undefined,
+    createdAt: order.createdAt.toISOString(),
+    updatedAt: order.updatedAt.toISOString(),
+    paymentSubmittedAt: order.paymentSubmittedAt?.toISOString(),
+    balanceCheckedAt: order.balanceCheckedAt?.toISOString()
   };
 }
 

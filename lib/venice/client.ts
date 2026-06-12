@@ -69,8 +69,8 @@ export async function veniceRequest(input: VeniceRequestInput): Promise<VeniceRe
   };
 }
 
-export async function fetchVeniceBillingBalance() {
-  const response = await veniceRequest({ path: "/api/v1/billing/balance" });
+export async function fetchVeniceBillingBalance(apiKey?: string) {
+  const response = await veniceRequest({ path: "/api/v1/billing/balance", apiKey });
   return response.body;
 }
 
@@ -89,6 +89,7 @@ export async function runVeniceChatCompletion(input: {
   prompt: string;
   systemPrompt?: string;
   model?: string;
+  apiKey?: string;
 }) {
   const messages = [];
   if (input.systemPrompt?.trim()) {
@@ -99,6 +100,7 @@ export async function runVeniceChatCompletion(input: {
   const response = await veniceRequest({
     method: "POST",
     path: "/api/v1/chat/completions",
+    apiKey: input.apiKey,
     body: {
       model: input.model?.trim() || getVeniceModel(),
       messages,

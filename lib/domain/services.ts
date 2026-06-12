@@ -1,15 +1,18 @@
 import {
   createCawGateway,
   getCawRuntimeStatus,
+  type CawGatewayConfig,
   type CawGateway,
   type CawTransactionRecord
 } from "@/lib/caw/gateway";
 import {
   createCawCliPairingCode,
+  getCawHomePathForUser,
   getCawCliPairingStatus,
   getCawCliRuntimeStatus,
   getCawWalletInfoFromList,
   readCawCliWalletProfile,
+  readCawCliProfileCredentials,
   runCawOnboard,
   showCawCliPact,
   submitCawCliPact
@@ -36,8 +39,10 @@ import { getCreditRepository } from "@/lib/store";
 import {
   discoverVeniceX402Requirements,
   pickVeniceBaseUsdcAccept,
+  runVeniceX402Topup,
   type VeniceX402Accept
 } from "@/lib/venice/topup";
+import { refreshVeniceBalance } from "@/lib/venice/balance";
 import { createPublicClient, formatUnits, getAddress, http } from "viem";
 import { base, baseSepolia } from "viem/chains";
 
@@ -213,8 +218,9 @@ async function getUserCawRuntimeStatus(
     });
   }
 
+  const config = await resolveUserCawGatewayConfig(user.id, user);
   return getCawRuntimeStatus({
-    walletId: getUserCawWalletId(user),
+    ...config,
     useDefaultWallet: false
   });
 }
@@ -298,6 +304,19 @@ export async function advanceCawWalletOnboarding(input: {
   }
 
   const onboarding = await repository.upsertCawOnboardingSession(partialSession);
+  if (completed && partialSession.walletId && connection?.walletAddress && partialSession.agentId && partialSession.apiUrl) {
+    await repository.upsertCawRuntimeCredential({
+      userId,
+      walletId: partialSession.walletId,
+      walletAddress: connection.walletAddress,
+      walletName: partialSession.walletName,
+      agentId: partialSession.agentId,
+      apiUrl: partialSession.apiUrl,
+      apiKeyEncrypted: `caw-cli-profile:${partialSession.walletId}`,
+      cawHomePath: getCawHomePathForUser(userId).replace(`${process.cwd()}/`, ""),
+      lastVerifiedAt: now
+    });
+  }
 
   return {
     onboarding,
@@ -384,7 +403,7 @@ export async function createPairingCode(input: { userId?: string }) {
   const pairing =
     onboarding?.status === "wallet_active"
       ? await createCawCliPairingCode(userId)
-      : await createCawGateway().createPairingCode({ userId, walletId });
+      : await (await createUserCawGateway(userId, user)).createPairingCode({ userId, walletId });
   const session = await repository.createPairingSession(userId, {
     code: pairing.code,
     status: pairing.status,
@@ -505,7 +524,7 @@ export async function connectCawWallet(input: {
   // Try CLI first (works without .env credentials — uses the local caw profile).
   // Fall back to gateway only if CLI can't resolve the wallet.
   let connection: { connectionId: string; walletId?: string; walletAddress: string };
-  const cliInfo = await getCawWalletInfoFromList(walletId);
+  const cliInfo = await getCawWalletInfoFromList(userId, walletId);
   if (cliInfo?.walletAddress) {
     connection = {
       connectionId: `cli_${walletId}`,
@@ -513,7 +532,7 @@ export async function connectCawWallet(input: {
       walletAddress: cliInfo.walletAddress
     };
   } else {
-    const gateway = createCawGateway();
+    const gateway = await createUserCawGateway(userId, user);
     connection = await gateway.connectWallet({
       userId,
       walletId,
@@ -547,7 +566,7 @@ export async function connectCawWallet(input: {
   // the gateway (which requires .env credentials).
   const existingOnboarding = await repository.getCawOnboardingSession(userId);
   if (!existingOnboarding || existingOnboarding.status !== "wallet_active") {
-    const cliInfo = await getCawWalletInfoFromList(walletId);
+    const cliInfo = await getCawWalletInfoFromList(userId, walletId);
     await repository.upsertCawOnboardingSession({
       userId,
       status: "wallet_active",
@@ -560,6 +579,19 @@ export async function connectCawWallet(input: {
       createdAt: existingOnboarding?.createdAt ?? repository.nowIso(),
       updatedAt: repository.nowIso()
     });
+    if (cliInfo?.agentId && cliInfo.apiUrl) {
+      await repository.upsertCawRuntimeCredential({
+        userId,
+        walletId: connection.walletId ?? walletId,
+        walletAddress: connection.walletAddress,
+        walletName: cliInfo.walletName,
+        agentId: cliInfo.agentId,
+        apiUrl: cliInfo.apiUrl,
+        apiKeyEncrypted: `caw-cli-profile:${connection.walletId ?? walletId}`,
+        cawHomePath: getCawHomePathForUser(userId).replace(`${process.cwd()}/`, ""),
+        lastVerifiedAt: repository.nowIso()
+      });
+    }
   }
 
   return {
@@ -597,7 +629,7 @@ export async function createCawAuthorization(input: {
           policies: preview.policies,
           completionConditions: preview.completionConditions
         })
-      : await createCawGateway().createPact({
+      : await (await createUserCawGateway(userId, user)).createPact({
           userId,
           walletId: wallet.walletId,
           walletAddress: wallet.walletAddress,
@@ -835,7 +867,7 @@ export async function refreshCawAuthorization(input: { userId?: string }) {
   const pact =
     onboarding?.status === "wallet_active"
       ? await showCawCliPact({ userId, pactId: authorization.pactId })
-      : await createCawGateway().getPact({ pactId: authorization.pactId });
+      : await (await createUserCawGateway(userId)).getPact({ pactId: authorization.pactId });
   const updated = await repository.updateAuthorization({
     ...authorization,
     status: pact.status,
@@ -872,10 +904,7 @@ export async function approveUsdcForCreditsPayment(input: {
     throw new Error("The active CAW Pact has no remaining spend for this approval. Create and approve a new Pact first.");
   }
 
-  const runtime = await getCawRuntimeStatus({
-    walletId: wallet.walletId,
-    useDefaultWallet: false
-  });
+  const runtime = await getUserRuntimeStatusForBoundWallet(userId, user);
   if (runtime.mode !== "http") {
     throw new Error("USDC approval requires real CAW mode.");
   }
@@ -905,7 +934,7 @@ export async function approveUsdcForCreditsPayment(input: {
     };
   }
 
-  const gateway = createCawGateway();
+  const gateway = await createUserCawGateway(userId, user);
   const result = await gateway.executeUsdcApproval({
     userId,
     walletId: wallet.walletId,
@@ -930,7 +959,7 @@ export async function requestTestTokens(input: { userId?: string; tokenId?: stri
   const userId = input.userId ?? DEMO_USER_ID;
   const user = await repository.requireUser(userId);
   const wallet = requireBoundCawWallet(user);
-  const gateway = createCawGateway();
+  const gateway = await createUserCawGateway(userId, user);
   const faucet = await gateway.requestFaucet({
     walletAddress: wallet.walletAddress,
     tokenId: input.tokenId
@@ -944,6 +973,7 @@ export async function requestTestTokens(input: { userId?: string; tokenId?: stri
 
 export async function runAgentTask(input: {
   userId?: string;
+  agentId?: string;
   taskName?: string;
   prompt?: string;
 }) {
@@ -951,6 +981,67 @@ export async function runAgentTask(input: {
   const userId = input.userId ?? DEMO_USER_ID;
   const taskName = input.taskName?.trim() || "research-agent";
   const prompt = input.prompt?.trim() || "Summarize wallet funding state and continue.";
+  const agent = input.agentId
+    ? (await repository.snapshotForUser(userId)).agents.find((candidate) => candidate.id === input.agentId)
+    : await repository.getOrCreateAgent({ userId, name: taskName });
+  if (!agent || agent.userId !== userId) {
+    throw new Error("Unknown agent for this user.");
+  }
+  let agentRun = await repository.createAgentRun({
+    userId,
+    agentId: agent.id,
+    taskName,
+    prompt,
+    status: "running"
+  });
+  const user = await repository.requireUser(userId);
+  const veniceAuthorization = await repository.getActiveAuthorization(userId, "venice_x402");
+  let veniceTopup: Awaited<ReturnType<typeof runVeniceX402Topup>> | undefined;
+  if (agent.veniceAutoTopup && user.cawWalletAddress && veniceAuthorization?.status === "active") {
+    try {
+      const balance = await refreshVeniceBalance({ walletAddress: user.cawWalletAddress });
+      if (!balance.canConsume) {
+        veniceTopup = await runVeniceX402Topup({
+          userId,
+          agentId: agent.id,
+          agentRunId: agentRun.id,
+          walletAddress: user.cawWalletAddress,
+          pactId: veniceAuthorization.pactId,
+          usdAmount: agent.veniceTopupUsdMinor / 1_000_000
+        });
+        if (!veniceTopup.balance?.canConsume) {
+          agentRun = await repository.updateAgentRun({
+            ...agentRun,
+            status: "waiting_for_venice_balance",
+            resumeAfterOrderId: veniceTopup.order?.id,
+            lastError: veniceTopup.order?.failureReason
+          });
+          await repository.updateAgent({ ...agent, status: "paused" });
+          return {
+            ok: false,
+            agent,
+            agentRun,
+            veniceTopup,
+            snapshot: await repository.snapshotForUser(userId)
+          };
+        }
+      }
+    } catch (error) {
+      agentRun = await repository.updateAgentRun({
+        ...agentRun,
+        status: "waiting_for_venice_balance",
+        lastError: error instanceof Error ? error.message : "Venice balance check failed."
+      });
+      await repository.updateAgent({ ...agent, status: "paused" });
+      return {
+        ok: false,
+        agent,
+        agentRun,
+        veniceTopup,
+        snapshot: await repository.snapshotForUser(userId)
+      };
+    }
+  }
   let account = await repository.requireCreditAccount(userId);
   const estimatedCredits = estimateAgentCredits(prompt);
   let topup: Awaited<ReturnType<typeof executeAutoTopup>> | undefined;
@@ -969,11 +1060,20 @@ export async function runAgentTask(input: {
       creditsCharged: 0,
       status: "failed_insufficient_balance"
     });
+    agentRun = await repository.updateAgentRun({
+      ...agentRun,
+      status: "failed",
+      lastError: "insufficient internal credits",
+      completedAt: repository.nowIso()
+    });
 
     return {
       ok: false,
+      agent,
+      agentRun,
       usageEvent,
       topup,
+      veniceTopup,
       snapshot: await repository.snapshotForUser(userId)
     };
   }
@@ -989,6 +1089,14 @@ export async function runAgentTask(input: {
     creditsCharged: estimatedCredits,
     status: "completed"
   });
+  agentRun = await repository.updateAgentRun({
+    ...agentRun,
+    status: "completed",
+    completedAt: repository.nowIso()
+  });
+  if (agent.status === "paused") {
+    await repository.updateAgent({ ...agent, status: "active" });
+  }
 
   await repository.appendLedgerEntry({
     userId,
@@ -1004,8 +1112,11 @@ export async function runAgentTask(input: {
 
   return {
     ok: true,
+    agent,
+    agentRun,
     usageEvent,
     topup,
+    veniceTopup,
     snapshot: await repository.snapshotForUser(userId)
   };
 }
@@ -1179,7 +1290,7 @@ export async function refreshPendingTopupOrders(input: { userId?: string }) {
 
   let gateway: CawGateway;
   try {
-    gateway = createCawGateway();
+    gateway = await createUserCawGateway(userId, user);
   } catch (error) {
     return {
       status: "skipped" as const,
@@ -1312,7 +1423,7 @@ export async function executeCreditsTopup(input: {
     status: "pending_policy"
   });
 
-  const gateway = createCawGateway();
+  const gateway = await createUserCawGateway(userId, user);
   const chain = getConfiguredChain();
   const cawResult = await gateway.executeCreditsPurchase({
     userId,
@@ -1445,6 +1556,21 @@ export async function settleCreditsPurchase(input: {
     order,
     snapshot: await repository.snapshotForUser(order.userId)
   };
+}
+
+export async function listCawTransactions(input: {
+  userId?: string;
+  limit?: number;
+}) {
+  const repository = getCreditRepository();
+  const userId = input.userId ?? DEMO_USER_ID;
+  const user = await repository.requireUser(userId);
+  const wallet = requireBoundCawWallet(user);
+  const gateway = await createUserCawGateway(userId, user);
+  return gateway.listTransactions({
+    walletId: wallet.walletId,
+    limit: input.limit
+  });
 }
 
 async function refreshSingleTopupOrder(input: {
@@ -1623,10 +1749,8 @@ async function checkRealPaymentPreflight(input: {
   pactId: string;
   amountUsdcMinor: number;
 }) {
-  const runtime = await getCawRuntimeStatus({
-    walletId: input.walletId,
-    useDefaultWallet: false
-  });
+  const user = await getCreditRepository().requireUser(input.userId);
+  const runtime = await getUserRuntimeStatusForBoundWallet(input.userId, user);
   if (runtime.mode !== "http") {
     return { ok: true as const };
   }
@@ -1882,14 +2006,44 @@ function requireBoundCawWallet(user: User) {
   };
 }
 
+async function createUserCawGateway(userId: string, user?: User) {
+  return createCawGateway(await resolveUserCawGatewayConfig(userId, user));
+}
+
+async function resolveUserCawGatewayConfig(
+  userId: string,
+  user?: User
+): Promise<CawGatewayConfig> {
+  const repository = getCreditRepository();
+  const currentUser = user ?? (await repository.requireUser(userId));
+  const credential = await repository.getCawRuntimeCredential(userId);
+  const walletId = currentUser.cawWalletId ?? credential?.walletId;
+  const walletAddress = currentUser.cawWalletAddress ?? credential?.walletAddress;
+  const profile = await readCawCliProfileCredentials(userId, walletId).catch(() => undefined);
+
+  return {
+    apiUrl: credential?.apiUrl || profile?.apiUrl,
+    apiKey: profile?.apiKey,
+    walletId,
+    walletAddress,
+    walletName: credential?.walletName || profile?.walletName,
+    allowEnvFallback: false
+  };
+}
+
+async function getUserRuntimeStatusForBoundWallet(userId: string, user: User) {
+  const config = await resolveUserCawGatewayConfig(userId, user);
+  return getCawRuntimeStatus({
+    ...config,
+    useDefaultWallet: false
+  });
+}
+
 function getUserCawWalletId(user: User) {
   if (user.cawWalletId) {
     return user.cawWalletId;
   }
-  if (!user.cawWalletAddress) {
-    return undefined;
-  }
-  return process.env.AGENT_WALLET_WALLET_ID || process.env.CAW_WALLET_ID;
+  return undefined;
 }
 
 function normalizeOnboardingStatus(input: {

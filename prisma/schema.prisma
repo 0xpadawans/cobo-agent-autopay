@@ -4,7 +4,7 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = "file:./dev.db"
+  url      = env("DATABASE_URL")
 }
 
 enum CawAuthorizationStatus {
@@ -33,6 +33,29 @@ enum TopupOrderStatus {
 enum AgentUsageStatus {
   completed
   failed_insufficient_balance
+}
+
+enum AgentStatus {
+  active
+  paused
+  disabled
+}
+
+enum AgentRunStatus {
+  running
+  waiting_for_venice_balance
+  completed
+  failed
+}
+
+enum VeniceTopupOrderStatus {
+  pending_policy
+  caw_submitted
+  payment_submitted
+  payment_failed
+  balance_pending
+  balance_confirmed
+  failed
 }
 
 enum LedgerEntryType {
@@ -67,9 +90,13 @@ model User {
   authorizations       CawAuthorization[]
   pairingSession       CawPairingSession?
   cawOnboardingSession CawWalletOnboardingSession?
+  cawRuntimeCredential CawRuntimeCredential?
   ledgerEntries        LedgerEntry[]
   topupOrders          TopupOrder[]
+  veniceTopupOrders    VeniceTopupOrder[]
   usageEvents          AgentUsageEvent[]
+  agents               Agent[]
+  agentRuns            AgentRun[]
 
   @@map("users")
 }
@@ -107,6 +134,26 @@ model CawWalletOnboardingSession {
   @@map("caw_wallet_onboarding_sessions")
 }
 
+model CawRuntimeCredential {
+  id              String    @id
+  userId          String    @unique
+  walletId        String    @unique
+  walletAddress   String    @unique
+  walletName      String?
+  agentId         String
+  apiUrl          String
+  apiKeyEncrypted String
+  cawHomePath     String?
+  keyVersion      Int       @default(1)
+  lastVerifiedAt  DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([agentId])
+  @@map("caw_runtime_credentials")
+}
+
 model CreditAccount {
   userId                     String   @id
   balanceCredits             Int
@@ -116,6 +163,77 @@ model CreditAccount {
   user                       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("credit_accounts")
+}
+
+model Agent {
+  id                  String       @id
+  userId              String
+  name                String
+  status              AgentStatus  @default(active)
+  veniceAutoTopup     Boolean      @default(true)
+  veniceTopupUsdMinor Int          @default(1000000)
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+  user                User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  runs                AgentRun[]
+  veniceTopupOrders   VeniceTopupOrder[]
+
+  @@unique([userId, name])
+  @@index([userId, status])
+  @@map("agents")
+}
+
+model AgentRun {
+  id                    String          @id
+  userId                String
+  agentId               String
+  taskName              String
+  prompt                String
+  status                AgentRunStatus
+  resumeAfterOrderId    String?
+  lastError             String?
+  startedAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+  completedAt           DateTime?
+  user                  User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent                 Agent           @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  resumeAfterOrder      VeniceTopupOrder? @relation("AgentRunResumeOrder", fields: [resumeAfterOrderId], references: [id], onDelete: SetNull)
+  veniceTopupOrders     VeniceTopupOrder[]
+
+  @@index([userId, agentId, status])
+  @@index([resumeAfterOrderId])
+  @@map("agent_runs")
+}
+
+model VeniceTopupOrder {
+  id                  String                  @id
+  userId              String
+  agentId             String?
+  agentRunId          String?
+  walletAddress       String
+  pactId              String
+  status              VeniceTopupOrderStatus
+  usdAmount           Float
+  amountUsdcMinor     Int
+  responseStatus      Int?
+  responseBodyPreview String?
+  txHash              String?
+  balanceCanConsume   Boolean?
+  balanceUsd          Float?
+  failureReason       String?
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+  paymentSubmittedAt  DateTime?
+  balanceCheckedAt    DateTime?
+  user                User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent               Agent?                  @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  agentRun            AgentRun?               @relation(fields: [agentRunId], references: [id], onDelete: SetNull)
+  resumeForRuns       AgentRun[]              @relation("AgentRunResumeOrder")
+
+  @@index([userId, status])
+  @@index([userId, agentId, status])
+  @@index([agentRunId])
+  @@map("venice_topup_orders")
 }
 
 model CawAuthorization {

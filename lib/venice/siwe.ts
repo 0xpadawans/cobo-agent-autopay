@@ -8,7 +8,7 @@
 // (the value is a base64-encoded JSON object describing the typed data +
 // the signature, similar to SIWE's compact serialisation).
 
-import { spawn } from "node:child_process";
+import { runCawCli } from "@/lib/caw/cli";
 
 const SIWE_DOMAIN = {
   name: "Venice AI",
@@ -83,6 +83,7 @@ export function buildSiweXTypedData(message: SiweXMessage): SiweXPayload["typedD
  * Returns the signature + a serialised header value.
  */
 export async function signSiweXWithCaw(input: {
+  userId: string;
   pactId: string;
   chainId: string; // e.g. "BASE_ETH" or "BASE_SEPOLIA"
   walletAddress: string;
@@ -113,40 +114,25 @@ export async function signSiweXWithCaw(input: {
     "60"
   ];
 
-  return new Promise((resolve, reject) => {
-    const child = spawn("caw", args, {
-      env: { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: "0" },
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (b) => (stdout += b.toString()));
-    child.stderr.on("data", (b) => (stderr += b.toString()));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(`caw tx sign-message failed (exit ${code}): ${stderr.slice(0, 500)}`));
-        return;
-      }
-      try {
-        const json = JSON.parse(stdout);
-        if (!json.success) {
-          reject(new Error(`caw tx sign-message returned success=false: ${stdout.slice(0, 500)}`));
-          return;
-        }
-        const signature: string =
-          json.signature ?? json.data?.signature ?? json.result?.signature ?? "";
-        const txId: string = json.tx_id ?? json.data?.tx_id ?? json.result?.tx_id ?? "";
-        if (!signature) {
-          reject(new Error(`caw tx sign-message returned no signature field: ${stdout.slice(0, 500)}`));
-          return;
-        }
-        resolve({ typedData, signature, txId });
-      } catch (e) {
-        reject(new Error(`Failed to parse caw output: ${(e as Error).message}; raw=${stdout.slice(0, 300)}`));
-      }
-    });
-  });
+  const result = await runCawCli(input.userId, args);
+  if (result.exitCode !== 0) {
+    throw new Error(`caw tx sign-message failed (exit ${result.exitCode}): ${result.stderr.slice(0, 500)}`);
+  }
+  try {
+    const json = JSON.parse(result.stdout);
+    if (!json.success) {
+      throw new Error(`caw tx sign-message returned success=false: ${result.stdout.slice(0, 500)}`);
+    }
+    const signature: string =
+      json.signature ?? json.data?.signature ?? json.result?.signature ?? "";
+    const txId: string = json.tx_id ?? json.data?.tx_id ?? json.result?.tx_id ?? "";
+    if (!signature) {
+      throw new Error(`caw tx sign-message returned no signature field: ${result.stdout.slice(0, 500)}`);
+    }
+    return { typedData, signature, txId };
+  } catch (error) {
+    throw new Error(`Failed to parse caw output: ${(error as Error).message}; raw=${result.stdout.slice(0, 300)}`);
+  }
 }
 
 /**

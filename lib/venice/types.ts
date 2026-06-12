@@ -1,6 +1,7 @@
 // Venice integration types
 // Schema derived from https://docs.venice.ai/api-reference/endpoint/x402/*
 // and https://docs.venice.ai/api-reference/endpoint/billing/*
+import type { VeniceTopupOrder } from "@/lib/domain/types";
 
 export type VeniceRuntimeConfigKey =
   | "venice_api_key"
@@ -88,6 +89,8 @@ export type VeniceX402TopupRequest = {
 
 export type VeniceX402TopupResult = {
   status: "submitted" | "failed";
+  order?: VeniceTopupOrder;
+  balance?: VeniceBalanceSnapshot;
   paymentPayload: string; // base64-encoded X-402-Payment header
   txHash?: string;
   responseStatus: number;

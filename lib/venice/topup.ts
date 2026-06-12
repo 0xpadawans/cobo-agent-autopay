@@ -8,37 +8,43 @@
 // credits the corresponding balance. No Venice API key required for the credit
 // balance side; SIWE auth is bypassed because payment itself proves identity.
 
-import { spawn } from "node:child_process";
-import { getCawRuntimeStatus } from "@/lib/caw/gateway";
+import { getCawCliRuntimeStatus, runCawFetchX402 } from "@/lib/caw/cli";
 import { getCreditRepository } from "@/lib/store";
 import { createInferenceLog } from "@/lib/store/venice";
-import { nowIso } from "@/lib/store/memory";
+import { refreshVeniceBalance } from "@/lib/venice/balance";
 
 // ── Payment lock ──────────────────────────────────────────────────────────
 export type PaymentLockState = 'idle' | 'processing' | 'cooldown';
 
-let paymentLock: PaymentLockState = 'idle';
-let lockTimer: NodeJS.Timeout | null = null;
+const paymentLocks = new Map<string, { state: PaymentLockState; timer?: NodeJS.Timeout }>();
 const LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes hard unlock
 const COOLDOWN_MS = 30_000;            // 30 seconds cool-down after success
 
 export function getPaymentLockState(): PaymentLockState {
-  return paymentLock;
+  return paymentLocks.get("global")?.state ?? "idle";
 }
 
-function setLock(state: PaymentLockState, timeoutMs?: number): void {
-  paymentLock = state;
-  if (lockTimer) {
-    clearTimeout(lockTimer);
-    lockTimer = null;
+function getLockKey(input: { userId: string; agentId?: string }) {
+  return `${input.userId}:${input.agentId ?? "user"}`;
+}
+
+function getScopedLockState(key: string): PaymentLockState {
+  return paymentLocks.get(key)?.state ?? "idle";
+}
+
+function setLock(key: string, state: PaymentLockState, timeoutMs?: number): void {
+  const existing = paymentLocks.get(key);
+  if (existing?.timer) {
+    clearTimeout(existing.timer);
   }
+  const entry: { state: PaymentLockState; timer?: NodeJS.Timeout } = { state };
   if (timeoutMs !== undefined) {
-    lockTimer = setTimeout(() => {
-      console.warn(`[payment-lock] Timer expired after ${timeoutMs}ms, forcing idle`);
-      paymentLock = 'idle';
-      lockTimer = null;
+    entry.timer = setTimeout(() => {
+      console.warn(`[payment-lock] Timer expired for ${key} after ${timeoutMs}ms, forcing idle`);
+      paymentLocks.set(key, { state: "idle" });
     }, timeoutMs);
   }
+  paymentLocks.set(key, entry);
 }
 
 // TODO: 钱包互充功能预留入口
@@ -100,42 +106,19 @@ export function pickBaseUsdcAccept(reqs: X402PaymentRequirementV2) {
 // Alias for remote wiki branch import
 export const pickVeniceBaseUsdcAccept = pickBaseUsdcAccept;
 
-function runCawFetch(pactId: string, url: string, body: object): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve, reject) => {
-    const args = [
-      "fetch",
-      pactId,
-      url,
-      "--method", "POST",
-      "--json", JSON.stringify(body),
-      "--protocol", "x402",
-      "--max-amount", "1000000000", // 1000 USDC cap; dashboard enforces real cap
-      "--network", "BASE_ETH", // base mainnet by default
-      "--output", "full",
-      "--timeout", "60"
-    ];
-    const child = spawn("caw", args, {
-      env: { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: "0" },
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (b) => (stdout += b.toString()));
-    child.stderr.on("data", (b) => (stderr += b.toString()));
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ stdout, stderr, exitCode: code ?? 1 }));
-  });
-}
-
 export async function runVeniceX402Topup(input: {
   userId: string;
+  agentId?: string;
+  agentRunId?: string;
   walletAddress: string;
   pactId: string;
   usdAmount: number;
 }): Promise<VeniceX402TopupResult> {
   // ── Payment lock check ────────────────────────────────────────────────
-  if (paymentLock !== 'idle') {
-    console.warn(`[payment-lock] runVeniceX402Topup blocked by state=${paymentLock}`);
+  const lockKey = getLockKey(input);
+  const lockState = getScopedLockState(lockKey);
+  if (lockState !== 'idle') {
+    console.warn(`[payment-lock] runVeniceX402Topup blocked for ${lockKey} by state=${lockState}`);
     return {
       status: "failed",
       paymentPayload: "",
@@ -145,17 +128,18 @@ export async function runVeniceX402Topup(input: {
       error: 'LOCK_BUSY'
     } as VeniceX402TopupResult & { error: string };
   }
-  setLock('processing', LOCK_TIMEOUT_MS);
+  setLock(lockKey, 'processing', LOCK_TIMEOUT_MS);
 
   const start = Date.now();
+  const repo = getCreditRepository();
   // Sanity checks
-  const runtime = await getCawRuntimeStatus();
+  const runtime = await getCawCliRuntimeStatus({ userId: input.userId });
   if (runtime.mode !== "http") {
-    setLock('idle');
+    setLock(lockKey, 'idle');
     throw new Error("Venice x402 top-up requires real CAW mode (CAW_MODE=http).");
   }
   if (!input.pactId) {
-    setLock('idle');
+    setLock(lockKey, 'idle');
     throw new Error("An active Pact is required. Create one from the dashboard first.");
   }
 
@@ -167,12 +151,34 @@ export async function runVeniceX402Topup(input: {
   // The body is just an empty/minimal JSON to satisfy the POST.
   const url = `${getVeniceBaseUrl()}${VENICE_X402_TOPUP_PATH}`;
   const body = { usdAmount: input.usdAmount, minorUnits: usdcMinor };
+  let order = await repo.createVeniceTopupOrder({
+    userId: input.userId,
+    agentId: input.agentId,
+    agentRunId: input.agentRunId,
+    walletAddress: input.walletAddress,
+    pactId: input.pactId,
+    status: "caw_submitted",
+    usdAmount: input.usdAmount,
+    amountUsdcMinor: usdcMinor
+  });
 
-  let result: Awaited<ReturnType<typeof runCawFetch>>;
+  let result: Awaited<ReturnType<typeof runCawFetchX402>>;
   try {
-    result = await runCawFetch(input.pactId, url, body);
+    result = await runCawFetchX402({
+      userId: input.userId,
+      pactId: input.pactId,
+      url,
+      body,
+      network: "BASE_ETH",
+      maxAmountMinor: 1_000_000_000
+    });
   } catch (error) {
-    setLock('idle');
+    order = await repo.updateVeniceTopupOrder({
+      ...order,
+      status: "failed",
+      failureReason: error instanceof Error ? error.message : "caw fetch failed"
+    });
+    setLock(lockKey, 'idle');
     throw error;
   }
   const durationMs = Date.now() - start;
@@ -182,6 +188,15 @@ export async function runVeniceX402Topup(input: {
   const statusLine = result.stdout.split("\n")[0]?.trim() ?? "";
   const statusMatch = statusLine.match(/\b(\d{3})\b/);
   const responseStatus = statusMatch ? Number(statusMatch[1]) : 0;
+  const success = responseStatus >= 200 && responseStatus < 300;
+  order = await repo.updateVeniceTopupOrder({
+    ...order,
+    status: success ? "payment_submitted" : "payment_failed",
+    responseStatus,
+    responseBodyPreview: result.stdout.slice(0, 2000),
+    failureReason: success ? undefined : (result.stderr || result.stdout).slice(0, 1000),
+    paymentSubmittedAt: success ? new Date().toISOString() : undefined
+  });
 
   // Log a ledger-style entry (we use inference log table for top-ups too, prefix model)
   createInferenceLog({
@@ -198,7 +213,6 @@ export async function runVeniceX402Topup(input: {
 
   // Also update authorization spent count (best-effort, doesn't break on miss)
   try {
-    const repo = getCreditRepository();
     const auth = await repo.getActiveAuthorization(input.userId, "venice_x402");
     if (auth) {
       await repo.updateAuthorization({
@@ -211,13 +225,32 @@ export async function runVeniceX402Topup(input: {
     // Non-fatal: best-effort budget tracking
   }
 
-  const success = responseStatus >= 200 && responseStatus < 300;
+  let balance: Awaited<ReturnType<typeof refreshVeniceBalance>> | undefined;
+  if (success) {
+    try {
+      balance = await refreshVeniceBalance({ walletAddress: input.walletAddress });
+      order = await repo.updateVeniceTopupOrder({
+        ...order,
+        status: balance.canConsume || balance.usdBalance > 0 ? "balance_confirmed" : "balance_pending",
+        balanceCanConsume: balance.canConsume,
+        balanceUsd: balance.usdBalance,
+        balanceCheckedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      order = await repo.updateVeniceTopupOrder({
+        ...order,
+        status: "balance_pending",
+        failureReason: error instanceof Error ? error.message : "balance check failed",
+        balanceCheckedAt: new Date().toISOString()
+      });
+    }
+  }
 
   if (success) {
-    setLock('cooldown');
-    setTimeout(() => setLock('idle'), COOLDOWN_MS);
+    setLock(lockKey, 'cooldown');
+    setTimeout(() => setLock(lockKey, 'idle'), COOLDOWN_MS);
   } else {
-    setLock('idle');
+    setLock(lockKey, 'idle');
     // Check for insufficient funds → fire hook
     if (/insufficient.*fund|INSUFFICIENT_FUNDS/i.test(result.stderr + result.stdout)) {
       void onInsufficientWalletBalance();
@@ -226,6 +259,8 @@ export async function runVeniceX402Topup(input: {
 
   return {
     status: success ? "submitted" : "failed",
+    order,
+    balance,
     paymentPayload: "",
     responseStatus,
     responseBody: result.stdout,

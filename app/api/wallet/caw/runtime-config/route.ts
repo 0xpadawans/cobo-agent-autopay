@@ -1,159 +1,90 @@
-// POST /api/wallet/caw/runtime-config
+// User-scoped CAW runtime binding.
 //
-// Body: { walletUuid, walletName?, apiUrl?, agentId? }
-//
-// Writes the bound CAW wallet into the in-memory CawRuntimeConfigStore
-// so the next /api/wallet/caw/status call reads the same UUID/API URL
-// without restarting the dev server. The dashboard CAW panel calls this
-// after the user picks a wallet from /api/wallet/caw/discover.
-//
-// GET returns the current bound runtime config (debug + UI use).
-//
-// NOTE: data resets on dev server restart (STORAGE_DRIVER=memory).
+// This route intentionally does not write process.env or the old global
+// runtime-config store. It exists for compatibility with dashboard callers that
+// still hit /runtime-config after discovering a wallet, but all data is resolved
+// through the current logged-in user.
 
 import { NextResponse } from "next/server";
-import { readFileSync, existsSync, readdirSync } from "fs";
-import { join } from "path";
 import { requireCurrentUser } from "@/lib/auth/session";
-import {
-  getCawRuntimeConfig,
-  listCawRuntimeConfig,
-  setCawRuntimeConfigAll,
-  clearCawRuntimeConfig
-} from "@/lib/caw/runtime-config-store";
-import type { CawRuntimeConfigKey } from "@/lib/venice/types";
+import { getCreditRepository } from "@/lib/store";
+import { connectCawWallet } from "@/lib/domain/services";
+import { readCawCliProfileCredentials } from "@/lib/caw/cli";
 
-type CawProfileCredentials = {
-  apiKey: string;
-  apiUrl: string;
-  agentId: string;
-  walletName: string;
-  walletUuid: string;
-};
-
-// Read the active caw CLI profile from disk. caw stores credentials in
-// ~/.cobo-agentic-wallet/profiles/<agent_id>/credentials (file perms
-// 600, owner-only). This route is a leaf node.js route (no client
-// instrumentation chain) so it's safe to import `fs` and `path` here.
-function readCawProfileCredentials(walletUuid?: string): CawProfileCredentials | null {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const home = process.env.HOME || require("os").homedir();
-  const profilesDir = join(home, ".cobo-agentic-wallet", "profiles");
-  if (!existsSync(profilesDir)) return null;
-
-  // Prefer the wallet the user marked as default in their caw config
-  // (~/.cobo-agentic-wallet/config). caw uses "default_profile" not
-  // "active_agent_id" — match the actual on-disk schema.
-  let defaultAgentId: string | null = null;
-  const configPath = join(home, ".cobo-agentic-wallet", "config");
-  if (existsSync(configPath)) {
-    try {
-      const cfg = JSON.parse(readFileSync(configPath, "utf-8"));
-      if (typeof cfg?.default_profile === "string") {
-        defaultAgentId = cfg.default_profile;
-      } else if (typeof cfg?.active_agent_id === "string") {
-        defaultAgentId = cfg.active_agent_id;
-      }
-    } catch {
-      // ignore parse error
-    }
-  }
-
-  const dirs = readdirSync(profilesDir)
-    .filter((d) => d.startsWith("profile_caw_agent_"))
-    .sort((a, b) => {
-      const aMatch = a === `profile_${defaultAgentId}`;
-      const bMatch = b === `profile_${defaultAgentId}`;
-      if (aMatch && !bMatch) return -1;
-      if (!aMatch && bMatch) return 1;
-      return 0;
-    });
-
-  for (const dir of dirs) {
-    const credPath = join(profilesDir, dir, "credentials");
-    if (!existsSync(credPath)) continue;
-    try {
-      const raw = readFileSync(credPath, "utf-8");
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      const apiKey = String(parsed.api_key ?? "");
-      const apiUrl = String(parsed.api_url ?? "");
-      const agentId = String(parsed.agent_id ?? "");
-      const profileWalletUuid = String(parsed.wallet_uuid ?? "");
-      if (!apiKey || !apiUrl) continue;
-      if (walletUuid && profileWalletUuid !== walletUuid) continue;
-      return {
-        apiKey,
-        apiUrl,
-        agentId,
-        walletName: String(parsed.wallet_name ?? "default"),
-        walletUuid: profileWalletUuid
-      };
-    } catch {
-      // Skip unparseable profile; keep scanning.
-    }
-  }
-  return null;
+function entriesFromCurrent(input: {
+  walletUuid?: string;
+  walletName?: string;
+  apiUrl?: string;
+  agentId?: string;
+}) {
+  const updatedAt = new Date().toISOString();
+  return [
+    input.walletUuid ? { key: "caw_wallet_uuid", value: input.walletUuid, updatedAt } : undefined,
+    input.walletName ? { key: "caw_wallet_name", value: input.walletName, updatedAt } : undefined,
+    input.apiUrl ? { key: "caw_api_url", value: input.apiUrl, updatedAt } : undefined,
+    input.agentId ? { key: "caw_agent_id", value: input.agentId, updatedAt } : undefined
+  ].filter(Boolean);
 }
 
 export async function GET(request: Request) {
-  await requireCurrentUser();
+  const user = await requireCurrentUser();
+  const repo = getCreditRepository();
   const url = new URL(request.url);
   const autobind = url.searchParams.get("autobind") === "1";
 
-  if (!autobind) {
+  if (autobind) {
+    const profile = await readCawCliProfileCredentials(user.id);
+    if (!profile?.walletId) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "no user-scoped caw profile found",
+          entries: []
+        },
+        { status: 404 }
+      );
+    }
+    const connected = await connectCawWallet({ userId: user.id, cawWalletId: profile.walletId });
     return NextResponse.json({
       ok: true,
-      entries: listCawRuntimeConfig()
+      autobound: true,
+      source: "user-caw-cli-profile",
+      current: {
+        walletUuid: connected.connection.walletId,
+        walletName: connected.snapshot.cawRuntimeCredential?.walletName,
+        apiUrl: connected.snapshot.cawRuntimeCredential?.apiUrl,
+        agentId: connected.snapshot.cawRuntimeCredential?.agentId
+      },
+      entries: entriesFromCurrent({
+        walletUuid: connected.connection.walletId,
+        walletName: connected.snapshot.cawRuntimeCredential?.walletName,
+        apiUrl: connected.snapshot.cawRuntimeCredential?.apiUrl,
+        agentId: connected.snapshot.cawRuntimeCredential?.agentId
+      })
     });
   }
 
-  // autobind: pull active caw profile from disk and seed RuntimeConfig.
-  // This is the "user installed caw skill → just bind it" path.
-  const profile = readCawProfileCredentials();
-  if (!profile) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "no caw profile found in ~/.cobo-agentic-wallet/profiles",
-        entries: listCawRuntimeConfig()
-      },
-      { status: 404 }
-    );
-  }
-
-  setCawRuntimeConfigAll({
-    caw_wallet_uuid: profile.walletUuid,
-    caw_wallet_name: profile.walletName,
-    caw_api_url: profile.apiUrl,
-    caw_agent_id: profile.agentId
-  });
-
-  // Seed an in-process env var so getCawRuntimeStatus() in
-  // lib/caw/gateway.ts can pick up the API key without gateway.ts
-  // having to import `fs` (which would break webpack's client bundle
-  // compilation through the instrumentation chain). This override
-  // lives only for the lifetime of the dev server process.
-  process.env.AGENT_WALLET_API_URL = profile.apiUrl;
-  process.env.AGENT_WALLET_API_KEY = profile.apiKey;
-  process.env.AGENT_WALLET_WALLET_ID = profile.walletUuid;
-
+  const credential = await repo.getCawRuntimeCredential(user.id);
   return NextResponse.json({
     ok: true,
-    autobound: true,
-    source: "caw-cli-profile",
-    profile: {
-      walletUuid: profile.walletUuid,
-      walletName: profile.walletName,
-      apiUrl: profile.apiUrl,
-      agentId: profile.agentId,
-      apiKeyTail: profile.apiKey.slice(-6)
+    source: "user-database",
+    current: {
+      walletUuid: user.cawWalletId ?? credential?.walletId,
+      walletName: credential?.walletName,
+      apiUrl: credential?.apiUrl,
+      agentId: credential?.agentId
     },
-    entries: listCawRuntimeConfig()
+    entries: entriesFromCurrent({
+      walletUuid: user.cawWalletId ?? credential?.walletId,
+      walletName: credential?.walletName,
+      apiUrl: credential?.apiUrl,
+      agentId: credential?.agentId
+    })
   });
 }
 
 export async function POST(request: Request) {
-  await requireCurrentUser();
+  const user = await requireCurrentUser();
   let body: Record<string, unknown>;
   try {
     body = (await request.json()) as Record<string, unknown>;
@@ -169,47 +100,33 @@ export async function POST(request: Request) {
     );
   }
 
-  const updates: Partial<Record<CawRuntimeConfigKey, string>> = {
-    caw_wallet_uuid: walletUuid
-  };
-
-  if (typeof body.walletName === "string" && body.walletName.trim()) {
-    updates.caw_wallet_name = body.walletName.trim();
-  }
-  if (typeof body.apiUrl === "string" && body.apiUrl.trim()) {
-    updates.caw_api_url = body.apiUrl.trim();
-  }
-  if (typeof body.agentId === "string" && body.agentId.trim()) {
-    updates.caw_agent_id = body.agentId.trim();
-  }
-
-  const written = setCawRuntimeConfigAll(updates);
-
-  // Also seed process.env so HttpCawGateway constructor can find the
-  // credentials immediately (it reads AGENT_WALLET_* env vars only).
-  // Look up the API key from the local caw CLI profile that matches
-  // the bound wallet UUID.
-  process.env.AGENT_WALLET_API_URL = updates.caw_api_url ?? "";
-  process.env.AGENT_WALLET_WALLET_ID = walletUuid;
-  const matchedProfile = readCawProfileCredentials(walletUuid);
-  if (matchedProfile) {
-    process.env.AGENT_WALLET_API_KEY = matchedProfile.apiKey;
-  }
-
+  const connected = await connectCawWallet({ userId: user.id, cawWalletId: walletUuid });
   return NextResponse.json({
     ok: true,
-    written: written.length,
+    source: "user-database",
+    written: connected.snapshot.cawRuntimeCredential ? 4 : 2,
     current: {
-      walletUuid: getCawRuntimeConfig("caw_wallet_uuid")?.value,
-      walletName: getCawRuntimeConfig("caw_wallet_name")?.value,
-      apiUrl: getCawRuntimeConfig("caw_api_url")?.value,
-      agentId: getCawRuntimeConfig("caw_agent_id")?.value
-    }
+      walletUuid: connected.connection.walletId,
+      walletName: connected.snapshot.cawRuntimeCredential?.walletName,
+      apiUrl: connected.snapshot.cawRuntimeCredential?.apiUrl,
+      agentId: connected.snapshot.cawRuntimeCredential?.agentId
+    },
+    entries: entriesFromCurrent({
+      walletUuid: connected.connection.walletId,
+      walletName: connected.snapshot.cawRuntimeCredential?.walletName,
+      apiUrl: connected.snapshot.cawRuntimeCredential?.apiUrl,
+      agentId: connected.snapshot.cawRuntimeCredential?.agentId
+    })
   });
 }
 
 export async function DELETE() {
   await requireCurrentUser();
-  clearCawRuntimeConfig();
-  return NextResponse.json({ ok: true, cleared: true });
+  return NextResponse.json(
+    {
+      ok: false,
+      error: "Clearing user CAW runtime config is not supported from this compatibility route."
+    },
+    { status: 405 }
+  );
 }

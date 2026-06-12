@@ -1,13 +1,17 @@
 import { createHash } from "node:crypto";
 import { CREDITS_PER_USDC, getConfiguredChain } from "@/lib/domain/constants";
 import type {
+  Agent,
+  AgentRun,
   AgentUsageEvent,
   CawAuthorization,
   CawAuthorizationPurpose,
+  CawRuntimeCredential,
   CreditAccount,
   DashboardSnapshot,
   LedgerEntry,
   TopupOrder,
+  VeniceTopupOrder,
   User,
   CawPairingSession,
   CawWalletOnboardingSession
@@ -92,6 +96,29 @@ export const memoryRepository: CreditRepository = {
     db.pairingSessions.set(userId, session);
     return session;
   },
+  async upsertCawRuntimeCredential(input): Promise<CawRuntimeCredential> {
+    const now = nowIso();
+    const existing = db.cawRuntimeCredentials.get(input.userId);
+    const credential: CawRuntimeCredential = {
+      id: existing?.id ?? createId("crc"),
+      userId: input.userId,
+      walletId: input.walletId,
+      walletAddress: input.walletAddress,
+      walletName: input.walletName,
+      agentId: input.agentId,
+      apiUrl: input.apiUrl,
+      cawHomePath: input.cawHomePath,
+      keyVersion: input.keyVersion ?? existing?.keyVersion ?? 1,
+      lastVerifiedAt: input.lastVerifiedAt,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now
+    };
+    db.cawRuntimeCredentials.set(input.userId, credential);
+    return credential;
+  },
+  async getCawRuntimeCredential(userId: string): Promise<CawRuntimeCredential | undefined> {
+    return db.cawRuntimeCredentials.get(userId);
+  },
   async getCawOnboardingSession(
     userId: string
   ): Promise<CawWalletOnboardingSession | undefined> {
@@ -102,6 +129,68 @@ export const memoryRepository: CreditRepository = {
   ): Promise<CawWalletOnboardingSession> {
     db.cawOnboardingSessions.set(session.userId, session);
     return session;
+  },
+  async getOrCreateAgent(input: { userId: string; name: string }): Promise<Agent> {
+    const existing = [...db.agents.values()].find(
+      (agent) => agent.userId === input.userId && agent.name === input.name
+    );
+    if (existing) {
+      return existing;
+    }
+    const now = nowIso();
+    const agent: Agent = {
+      id: createId("agt"),
+      userId: input.userId,
+      name: input.name,
+      status: "active",
+      veniceAutoTopup: true,
+      veniceTopupUsdMinor: 1_000_000,
+      createdAt: now,
+      updatedAt: now
+    };
+    db.agents.set(agent.id, agent);
+    return agent;
+  },
+  async updateAgent(agent: Agent): Promise<Agent> {
+    const updated = { ...agent, updatedAt: nowIso() };
+    db.agents.set(agent.id, updated);
+    return updated;
+  },
+  async createAgentRun(
+    input: Omit<AgentRun, "id" | "startedAt" | "updatedAt" | "completedAt">
+  ): Promise<AgentRun> {
+    const now = nowIso();
+    const run: AgentRun = {
+      ...input,
+      id: createId("run"),
+      startedAt: now,
+      updatedAt: now
+    };
+    db.agentRuns.set(run.id, run);
+    return run;
+  },
+  async updateAgentRun(run: AgentRun): Promise<AgentRun> {
+    const updated = { ...run, updatedAt: nowIso() };
+    db.agentRuns.set(run.id, updated);
+    return updated;
+  },
+  async createVeniceTopupOrder(
+    input: Omit<VeniceTopupOrder, "id" | "createdAt" | "updatedAt">
+  ): Promise<VeniceTopupOrder> {
+    const now = nowIso();
+    const order: VeniceTopupOrder = {
+      ...input,
+      id: createId("vto"),
+      createdAt: now,
+      updatedAt: now
+    };
+    db.veniceTopupOrders.set(order.id, order);
+    return order;
+  },
+  async updateVeniceTopupOrder(order: VeniceTopupOrder): Promise<VeniceTopupOrder> {
+    const updated = { ...order, updatedAt: nowIso() };
+    db.veniceTopupOrders.set(order.id, updated);
+    return updated;
   },
   async createUsageEvent(
     input: Omit<AgentUsageEvent, "id" | "createdAt">

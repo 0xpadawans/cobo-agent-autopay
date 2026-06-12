@@ -3,12 +3,11 @@
 // BlockRun 是实时扣款模式，每次推理直接从 CAW 钱包扣款，没有预充值额度概念。
 //
 // 架构说明：
-// - 复用 lib/venice/topup.ts 的 runCawFetch()（spawn caw fetch --protocol=x402）
+// - 复用用户隔离的 CAW CLI wrapper 执行 caw fetch
 // - 不从 venice/topup.ts import 任何东西，避免耦合
-// - 自己实现 runCawFetch() 的等价调用（实际就是 spawn caw fetch）
 // - 所有环境变量前缀 BLOCKRUN_
 
-import { spawn } from "node:child_process";
+import { runCawFetchX402 } from "@/lib/caw/cli";
 import { getCreditRepository } from "@/lib/store";
 import type { BlockRunX402Request, BlockRunX402Result, BlockRunX402Step } from "@/lib/blockrun/types";
 
@@ -30,39 +29,6 @@ function getBlockRunConfig() {
     // CAW Pact 策略用 CAW 内部链名
     cawChainId: isTestnet ? "TBASE_SETH" : "BASE_ETH",
   };
-}
-
-// ── runCawFetch (本地副本，复用逻辑) ──────────────────────────────────────
-function runCawFetch(
-  pactId: string,
-  url: string,
-  body: object,
-  network?: string
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve, reject) => {
-    const args = [
-      "fetch",
-      pactId,
-      url,
-      "--method", "POST",
-      "--json", JSON.stringify(body),
-      "--protocol", "x402",
-      "--max-amount", "1000000000", // 1000 USDC cap
-      "--network", network ?? "eip155:84532",
-      "--output", "full",
-      "--timeout", "60",
-    ];
-    const child = spawn("caw", args, {
-      env: { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: "0" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (b) => (stdout += b.toString()));
-    child.stderr.on("data", (b) => (stderr += b.toString()));
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ stdout, stderr, exitCode: code ?? 1 }));
-  });
 }
 
 // ── BlockRun x402 推理执行 ────────────────────────────────────────────────
@@ -116,9 +82,16 @@ export async function runBlockRunX402Inference(input: {
   };
 
   // 2. 通过 caw fetch 发起 x402 推理请求
-  let result: Awaited<ReturnType<typeof runCawFetch>>;
+  let result: Awaited<ReturnType<typeof runCawFetchX402>>;
   try {
-    result = await runCawFetch(input.pactId, url, body, config.network);
+    result = await runCawFetchX402({
+      userId: input.userId,
+      pactId: input.pactId,
+      url,
+      body,
+      network: config.network,
+      maxAmountMinor: 1_000_000_000
+    });
   } catch (error) {
     return {
       status: "failed",

@@ -20,7 +20,10 @@ type BillingBalanceResponse = {
   diemEpochAllocation?: number;
 };
 
-export async function refreshVeniceBalance(input: { walletAddress?: string } = {}): Promise<VeniceBalanceSnapshot> {
+export async function refreshVeniceBalance(input: {
+  walletAddress?: string;
+  apiKey?: string;
+} = {}): Promise<VeniceBalanceSnapshot> {
   const walletAddress = input.walletAddress;
 
   // Primary: billing API (Bearer key, no SIWE required)
@@ -33,7 +36,7 @@ export async function refreshVeniceBalance(input: { walletAddress?: string } = {
   let raw: unknown;
 
   try {
-    const billing = await fetchVeniceBillingBalance() as BillingBalanceResponse;
+    const billing = await fetchVeniceBillingBalance(input.apiKey) as BillingBalanceResponse;
     canConsume = Boolean(billing.canConsume);
     consumptionCurrency = billing.consumptionCurrency ?? null;
     diemBalance = Number(billing.balances?.diem ?? 0);

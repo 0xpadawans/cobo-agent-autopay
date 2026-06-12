@@ -1,4 +1,5 @@
 // Venice x402 余额查询端点
+import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { requireCurrentUser } from "@/lib/auth/session";
 import { errorJson, okJson, readJson } from "@/lib/http";
@@ -42,8 +43,7 @@ async function isPactActive(pactId: string): Promise<boolean> {
 
 // SIWE 消息构造
 function buildSiweMessage(walletAddress: string) {
-  const crypto = require("crypto");
-  const nonce = crypto.randomBytes(8).toString("hex");
+  const nonce = randomBytes(8).toString("hex");
   const now = new Date();
   const exp = new Date(now.getTime() + 10 * 60 * 1000);
 
@@ -116,7 +116,7 @@ async function signWithCaw(
 
 // 从 caw tx list 获取签名
 async function getSignatureFromCaw(requestId: string): Promise<string | null> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const child = spawn("caw", ["tx", "list", "--limit", "5"], {
       env: { ...process.env, NODE_TLS_REJECT_UNAUTHORIZED: "0" },
       stdio: ["ignore", "pipe", "pipe"],
