@@ -3,11 +3,17 @@
 import { useEffect, useState } from 'react';
 import { Wallet, Coins, Activity, CalendarClock } from 'lucide-react';
 import StatCard from './StatCard';
+import TreasuryCard from './TreasuryCard';
 
 type BalanceResponse = { ok?: boolean; balance?: number; snapshot?: { usdBalance?: number } };
 type SnapshotResponse = {
   account?: { balanceCredits?: number };
   paymentStats?: { txCount30d?: number };
+};
+type SweepStatusResponse = {
+  treasuryStatus?: string;
+  treasuryLastAmount?: number | null;
+  treasuryLastTransferAt?: string | null;
 };
 
 type Stats = {
@@ -15,6 +21,9 @@ type Stats = {
   cawAddress: string | null;
   monthlyTopups: number | null;
   creditBalance: number | null;
+  treasuryStatus: string | null;
+  treasuryLastAmount: number | null;
+  treasuryLastTransferAt: string | null;
 };
 
 function shortAddr(addr: string | null | undefined): string | null {
@@ -24,11 +33,12 @@ function shortAddr(addr: string | null | undefined): string | null {
 }
 
 /**
- * 区块 1：4 个数据卡
+ * 区块 1：5 个数据卡（4 个原有 + 1 个 Treasury 互充状态）
  * - Venice 余额：/api/venice/balance
  * - CAW 钱包地址：/api/wallet/caw/status
  * - 本月充值次数：/api/credits/balance → paymentStats.txCount30d
  * - 积分余额：/api/credits/balance → account.balanceCredits
+ * - Treasury 状态：/api/credits/topup/sweep-status
  */
 export default function StatsSection() {
   const [stats, setStats] = useState<Stats>({
@@ -36,22 +46,27 @@ export default function StatsSection() {
     cawAddress: null,
     monthlyTopups: null,
     creditBalance: null,
+    treasuryStatus: null,
+    treasuryLastAmount: null,
+    treasuryLastTransferAt: null,
   });
   const [loading, setLoading] = useState({
     venice: true,
     caw: true,
     credits: true,
+    sweep: true,
   });
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
-      // 3 个独立 fetch 改成 Promise.allSettled 并行，避免串行等待
-      const [balanceRes, statusRes, creditsRes] = await Promise.allSettled([
+      // 4 个独立 fetch 并行
+      const [balanceRes, statusRes, creditsRes, sweepRes] = await Promise.allSettled([
         fetch('/api/venice/balance'),
         fetch('/api/wallet/caw/status'),
         fetch('/api/credits/balance'),
+        fetch('/api/credits/topup/sweep-status'),
       ]);
 
       // Venice balance
@@ -102,6 +117,24 @@ export default function StatsSection() {
         }
       }
       if (!cancelled) setLoading((l) => ({ ...l, credits: false }));
+
+      // Treasury / sweep status
+      if (sweepRes.status === "fulfilled") {
+        try {
+          const data: SweepStatusResponse = await sweepRes.value.json();
+          if (!cancelled) {
+            setStats((s) => ({
+              ...s,
+              treasuryStatus: data.treasuryStatus ?? null,
+              treasuryLastAmount: data.treasuryLastAmount ?? null,
+              treasuryLastTransferAt: data.treasuryLastTransferAt ?? null,
+            }));
+          }
+        } catch {
+          // ignore
+        }
+      }
+      if (!cancelled) setLoading((l) => ({ ...l, sweep: false }));
     }
 
     load();
@@ -111,7 +144,7 @@ export default function StatsSection() {
   }, []);
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
       <StatCard
         label="Venice 余额"
         value={stats.veniceBalance !== null ? `$${stats.veniceBalance.toFixed(2)}` : '—'}
@@ -147,6 +180,12 @@ export default function StatsSection() {
         iconBg="bg-indigo-50"
         loading={loading.credits}
         hint="站内积分"
+      />
+      <TreasuryCard
+        status={stats.treasuryStatus as 'idle' | 'transferring' | 'completed' | 'failed' | null}
+        lastAmount={stats.treasuryLastAmount}
+        lastTransferAt={stats.treasuryLastTransferAt}
+        isLoading={loading.sweep}
       />
     </div>
   );

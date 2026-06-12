@@ -6,6 +6,7 @@
 
 import { getR34SweepHeartbeatStatus } from "@/lib/r34-sweep-heartbeat";
 import { ensureR34SweepHeartbeatRunning } from "@/lib/r34-sweep-heartbeat";
+import { getTreasuryStatus } from "@/lib/caw/transfer";
 import { okJson } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
@@ -15,5 +16,14 @@ export async function GET() {
   // / cold start / hot reload 后没重启), 第一次 GET 这个 status 路由
   // 也启动 heartbeat. 适用 cron tick 单次实现不想 kill dev server 的场景.
   ensureR34SweepHeartbeatRunning();
-  return okJson(getR34SweepHeartbeatStatus());
+
+  const heartbeat = getR34SweepHeartbeatStatus();
+  const { treasuryStatus, treasuryLastAmount, treasuryLastTransferAt } = getTreasuryStatus();
+
+  return okJson({
+    ...heartbeat,
+    treasuryStatus,
+    treasuryLastAmount,
+    treasuryLastTransferAt,
+  });
 }

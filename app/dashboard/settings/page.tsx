@@ -6,6 +6,7 @@ import AutoTopupSettings from '@/components/settings/v2/AutoTopupSettings';
 import VeniceConfig from '@/components/settings/v2/VeniceConfig';
 import CawWalletInfo from '@/components/settings/v2/CawWalletInfo';
 import GuardrailsCard from '@/components/settings/v2/GuardrailsCard';
+import TreasuryConfig from '@/components/settings/v2/TreasuryConfig';
 
 /**
  * Settings — 按需求文档 §六 重写
@@ -44,6 +45,9 @@ export default function SettingsPage() {
 
         {/* 区块 4：Guardrails */}
         <GuardrailsCard />
+
+        {/* 区块 5：Treasury 配置 */}
+        <TreasuryConfig />
       </div>
     </AppLayout>
   );
